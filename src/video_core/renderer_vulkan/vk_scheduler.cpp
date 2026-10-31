@@ -75,7 +75,7 @@ void Scheduler::WaitWorker() {
     // Ensure the queue is drained.
     {
         std::unique_lock ql{queue_mutex};
-        event_cv.wait(ql, [this] { return work_queue.empty(); });
+        drain_cv.wait(ql, [this] { return work_queue.empty(); });
     }
 
     // Now wait for execution to finish.
@@ -84,11 +84,18 @@ void Scheduler::WaitWorker() {
 
 void Scheduler::DispatchWork() {
     if (chunk && !chunk->Empty()) {
+        // The worker only sleeps after seeing an empty queue under queue_mutex, so it only needs
+        // a wake-up when this push makes the queue non-empty. Waking it for every chunk (every
+        // few draws) turned into a futex wake storm on the GPU thread.
+        bool was_empty;
         {
             std::scoped_lock ql{queue_mutex};
+            was_empty = work_queue.empty();
             work_queue.push(std::move(chunk));
         }
-        event_cv.notify_all();
+        if (was_empty) {
+            work_cv.notify_one();
+        }
         AcquireNewChunk();
     }
 }
@@ -279,7 +286,9 @@ void Scheduler::WorkerThread(std::stop_token stop_token) {
 
         work = std::move(work_queue.front());
         work_queue.pop();
-        event_cv.notify_all();
+        if (work_queue.empty()) {
+            drain_cv.notify_all();
+        }
         return true;
     }};
 
@@ -290,7 +299,7 @@ void Scheduler::WorkerThread(std::stop_token stop_token) {
             std::unique_lock lk{queue_mutex};
 
             // Wait for work.
-            event_cv.wait(lk, stop_token, [&] { return TryPopQueue(work); });
+            work_cv.wait(lk, stop_token, [&] { return TryPopQueue(work); });
 
             // If we've been asked to stop, we're done.
             if (stop_token.stop_requested()) {

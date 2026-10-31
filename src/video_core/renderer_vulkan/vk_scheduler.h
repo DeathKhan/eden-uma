@@ -322,7 +322,10 @@ private:
     std::mutex execution_mutex;
     std::mutex reserve_mutex;
     std::mutex queue_mutex;
-    std::condition_variable_any event_cv;
+    /// Signalled when the work queue goes from empty to non-empty (the worker waits on it).
+    std::condition_variable_any work_cv;
+    /// Signalled when the worker pops the last queued chunk (WaitWorker waits on it).
+    std::condition_variable_any drain_cv;
     std::jthread worker_thread;
 
     std::chrono::steady_clock::duration frame_interval{};
