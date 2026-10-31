@@ -6,6 +6,9 @@
 
 #pragma once
 
+#include <algorithm>
+#include <vector>
+
 #include "common/alignment.h"
 #include "common/common_types.h"
 
@@ -26,59 +29,56 @@ public:
         std::ranges::fill(pages, 0ULL);
     }
 
+    /// Marks the 64-byte units overlapping the byte range [offset, offset + size) as used.
     void Track(u64 offset, u64 size) noexcept {
-        const size_t page = offset >> BUFFER_PAGE_SHIFT;
-        const size_t page_end = (offset + size) >> BUFFER_PAGE_SHIFT;
-        if (page_end < page || page_end >= pages.size()) {
-            return;
-        }
-        TrackPage(page, offset, size);
-        if (page == page_end) {
-            return;
-        }
-        for (size_t i = page + 1; i < page_end; i++) {
-            pages[i] = ~u64{0};
-        }
-        const size_t offset_end = offset + size;
-        const size_t offset_end_page_aligned = Common::AlignDown(offset_end, BUFFER_PAGE_BYTES);
-        TrackPage(page_end, offset_end_page_aligned, offset_end - offset_end_page_aligned);
+        ForEachPageMask(offset, size, [this](size_t page, u64 mask) {
+            pages[page] |= mask;
+            return false;
+        });
     }
 
+    /// Returns true if any 64-byte unit overlapping [offset, offset + size) was tracked. Rounds
+    /// outward like Track, so it never misses a tracked byte in the queried range.
     [[nodiscard]] bool IsUsed(u64 offset, u64 size) const noexcept {
-        const size_t page = offset >> BUFFER_PAGE_SHIFT;
-        const size_t page_end = (offset + size) >> BUFFER_PAGE_SHIFT;
-        if (page_end < page || page_end >= pages.size()) {
-            return false;
-        }
-        if (IsPageUsed(page, offset, size)) {
-            return true;
-        }
-        for (size_t i = page + 1; i < page_end; i++) {
-            if (pages[i] != 0) {
-                return true;
-            }
-        }
-        const size_t offset_end = offset + size;
-        const size_t offset_end_page_aligned = Common::AlignDown(offset_end, BUFFER_PAGE_BYTES);
-        return IsPageUsed(page_end, offset_end_page_aligned, offset_end - offset_end_page_aligned);
+        bool used = false;
+        ForEachPageMask(offset, size, [&](size_t page, u64 mask) {
+            used = (pages[page] & mask) != 0;
+            return used;
+        });
+        return used;
     }
 
 private:
-    void TrackPage(u64 page, u64 offset, u64 size) noexcept {
-        const size_t offset_in_page = offset % BUFFER_PAGE_BYTES;
-        const size_t first_bit = offset_in_page >> BUFFER_BYTES_PER_BITSHIFT;
-        const size_t num_bits = std::min<size_t>(size, BUFFER_PAGE_BYTES) >> BUFFER_BYTES_PER_BITSHIFT;
-        const size_t mask = ~u64{0} >> (64 - num_bits);
-        pages[page] |= (~u64{0} & mask) << first_bit;
+    static constexpr u64 UNITS_PER_PAGE_MASK = (1ULL << (BUFFER_PAGE_SHIFT - BUFFER_BYTES_PER_BITSHIFT)) - 1;
+
+    /// Bits [first, last] of a word, both inclusive and in [0, 63].
+    static constexpr u64 BitRange(u64 first, u64 last) noexcept {
+        return (~u64{0} >> (63 - last)) & (~u64{0} << first);
     }
 
-    bool IsPageUsed(u64 page, u64 offset, u64 size) const noexcept {
-        const size_t offset_in_page = offset % BUFFER_PAGE_BYTES;
-        const size_t first_bit = offset_in_page >> BUFFER_BYTES_PER_BITSHIFT;
-        const size_t num_bits = std::min<size_t>(size, BUFFER_PAGE_BYTES) >> BUFFER_BYTES_PER_BITSHIFT;
-        const size_t mask = ~u64{0} >> (64 - num_bits);
-        const size_t mask2 = (~u64{0} & mask) << first_bit;
-        return (pages[page] & mask2) != 0;
+    /// Calls func(page, mask) for each page touched by [offset, offset + size), clamped to the
+    /// tracked size, until func returns true.
+    template <typename Func>
+    void ForEachPageMask(u64 offset, u64 size, Func&& func) const noexcept {
+        if (size == 0 || pages.empty()) {
+            return;
+        }
+        const u64 max_unit = (u64(pages.size()) << (BUFFER_PAGE_SHIFT - BUFFER_BYTES_PER_BITSHIFT)) - 1;
+        const u64 first_unit = offset >> BUFFER_BYTES_PER_BITSHIFT;
+        if (first_unit > max_unit) {
+            return;
+        }
+        const u64 end = offset + size < offset ? ~u64{0} : offset + size; // saturate on overflow
+        const u64 last_unit = std::min<u64>((end - 1) >> BUFFER_BYTES_PER_BITSHIFT, max_unit);
+        const u64 first_page = first_unit >> (BUFFER_PAGE_SHIFT - BUFFER_BYTES_PER_BITSHIFT);
+        const u64 last_page = last_unit >> (BUFFER_PAGE_SHIFT - BUFFER_BYTES_PER_BITSHIFT);
+        for (u64 page = first_page; page <= last_page; ++page) {
+            const u64 lo = page == first_page ? (first_unit & UNITS_PER_PAGE_MASK) : 0;
+            const u64 hi = page == last_page ? (last_unit & UNITS_PER_PAGE_MASK) : 63;
+            if (func(size_t(page), BitRange(lo, hi))) {
+                return;
+            }
+        }
     }
 
 private:
