@@ -173,15 +173,24 @@ bool ArmNce::HandleGuestAccessFault(GuestContext* guest_ctx, void* raw_info, voi
         // invalidation and one mprotect per 4 KiB page. When a core faults on the page right
         // after the range it last handled, unprotect a doubling window ahead of it as well.
         constexpr size_t MaxFaultWindow = 256_KiB;
-        const u64 next = GetInteger(addr) + Memory::YUZU_PAGESIZE;
-        if (GetInteger(addr) == nce->m_next_fault_addr) {
+        // A forward jump of at most this far in an active stream keeps the window (halved).
+        constexpr u64 MaxForwardJump = 256_KiB;
+        const u64 fault = GetInteger(addr);
+        const u64 next = fault + Memory::YUZU_PAGESIZE;
+        if (fault == nce->m_next_fault_addr) {
             nce->m_fault_window = std::clamp<size_t>(nce->m_fault_window * 2,
                                                      Memory::YUZU_PAGESIZE, MaxFaultWindow);
-            nce->m_next_fault_addr = next + memory.InvalidateNCEAhead(next, nce->m_fault_window);
+        } else if (nce->m_fault_window != 0 && fault > nce->m_next_fault_addr &&
+                   fault - nce->m_next_fault_addr <= MaxForwardJump) {
+            // The stream skipped ahead (most resets in the Luigi's Mansion 3 lobby are such
+            // forward jumps): keep speculating at the new place with half the window instead of
+            // regrowing it from a single page. Speculation keeps all of its checks.
+            nce->m_fault_window = (std::max)(nce->m_fault_window / 2, Memory::YUZU_PAGESIZE);
         } else {
             nce->m_fault_window = 0;
-            nce->m_next_fault_addr = next;
         }
+        nce->m_next_fault_addr =
+            next + (nce->m_fault_window != 0 ? memory.InvalidateNCEAhead(next, nce->m_fault_window) : 0);
         // We handled the access successfully and are returning to guest code.
         return true;
     }
