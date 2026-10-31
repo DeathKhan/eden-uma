@@ -700,6 +700,7 @@ void BlitImageHelper::BlitColor(const Framebuffer* dst_framebuffer, VkImageView 
         cmdbuf.Draw(3, 1, 0, 0);
         cmdbuf.EndRenderPass();
     });
+    scheduler.InvalidateState();
 }
 
 void BlitImageHelper::BlitImpl(const Framebuffer* dst_framebuffer,
