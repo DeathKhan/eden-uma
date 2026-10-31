@@ -135,7 +135,12 @@ android {
                 signingConfigs.getByName("default")
             }
 
-            if (isNightly) {
+            // Side-by-side installs (-PedenIdSuffix=.foo -PedenNameSuffix=" Foo"), e.g. to compare builds on one device.
+            val idSuffix = project.findProperty("edenIdSuffix") as String?
+            if (idSuffix != null) {
+                applicationIdSuffix = idSuffix
+                manifestPlaceholders += mapOf("appNameSuffix" to ((project.findProperty("edenNameSuffix") as String?) ?: idSuffix))
+            } else if (isNightly) {
                 applicationIdSuffix = ".nightly"
                 manifestPlaceholders += mapOf("appNameSuffix" to " Nightly")
             } else {
