@@ -226,6 +226,11 @@ void PhysicalCore::Idle() {
     m_on_interrupt.wait(lk, [this] { return m_is_interrupted; });
 }
 
+void PhysicalCore::IdleFor(std::chrono::nanoseconds timeout) {
+    std::unique_lock lk{m_guard};
+    m_on_interrupt.wait_for(lk, timeout, [this] { return m_is_interrupted; });
+}
+
 bool PhysicalCore::IsInterrupted() const {
     return m_is_interrupted;
 }

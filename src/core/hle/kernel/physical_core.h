@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <memory>
@@ -51,6 +52,9 @@ public:
 
     // Wait for an interrupt.
     void Idle();
+
+    /// Like Idle(), but gives up after the timeout. Returns early on Interrupt().
+    void IdleFor(std::chrono::nanoseconds timeout);
 
     // Interrupt this core.
     void Interrupt();

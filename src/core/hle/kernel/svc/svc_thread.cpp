@@ -4,6 +4,8 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+
 #include "common/scope_exit.h"
 #include "core/core.h"
 #include "core/core_timing.h"
@@ -11,6 +13,7 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_scoped_resource_reservation.h"
 #include "core/hle/kernel/k_thread.h"
+#include "core/hle/kernel/physical_core.h"
 #include "core/hle/kernel/svc.h"
 
 namespace Kernel::Svc {
@@ -130,12 +133,40 @@ void SleepThread(Core::System& system, s64 ns) {
         // Sleep.
         // NOTE: Nintendo does not check the result of this sleep.
         static_cast<void>(GetCurrentThread(kernel).Sleep(kernel, timeout));
-    } else if (yield_type == Svc::YieldType::WithoutCoreMigration) {
-        KScheduler::YieldWithoutCoreMigration(kernel);
-    } else if (yield_type == Svc::YieldType::WithCoreMigration) {
-        KScheduler::YieldWithCoreMigration(kernel);
-    } else if (yield_type == Svc::YieldType::ToAnyThread) {
-        KScheduler::YieldToAnyThread(kernel);
+    } else if (yield_type == Svc::YieldType::WithoutCoreMigration ||
+               yield_type == Svc::YieldType::WithCoreMigration ||
+               yield_type == Svc::YieldType::ToAnyThread) {
+        // A yield is a no-op when nothing was scheduled since this thread's last yield. Games
+        // poll with tight loops of these; on the host each one is a full SVC round trip that
+        // keeps a prime core at full clock. After a burst of back-to-back no-op yields, idle the
+        // host core briefly. The idle ends early on PhysicalCore::Interrupt(), which is how
+        // rescheduling reaches this core, so newly runnable threads only pay host wake latency.
+        // Not used in single-core mode, where one host thread runs every emulated core.
+        constexpr u32 IdleYieldBurst = 32;
+        constexpr s64 IdleYieldGapNs = 50'000;
+        auto& thread = GetCurrentThread(kernel);
+        if (kernel.IsMulticore() &&
+            thread.GetYieldScheduleCount() == GetCurrentProcess(kernel).GetScheduledCount()) {
+            const s64 now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count();
+            thread.m_idle_yield_count =
+                now - thread.m_last_idle_yield_ns < IdleYieldGapNs ? thread.m_idle_yield_count + 1 : 0;
+            thread.m_last_idle_yield_ns = now;
+            if (thread.m_idle_yield_count >= IdleYieldBurst) {
+                thread.m_idle_yield_count = 0;
+                kernel.CurrentPhysicalCore().IdleFor(std::chrono::microseconds(50));
+            }
+        } else {
+            thread.m_idle_yield_count = 0;
+        }
+        if (yield_type == Svc::YieldType::WithoutCoreMigration) {
+            KScheduler::YieldWithoutCoreMigration(kernel);
+        } else if (yield_type == Svc::YieldType::WithCoreMigration) {
+            KScheduler::YieldWithCoreMigration(kernel);
+        } else {
+            KScheduler::YieldToAnyThread(kernel);
+        }
     } else {
         // Nintendo does nothing at all if an otherwise invalid value is passed.
     }
