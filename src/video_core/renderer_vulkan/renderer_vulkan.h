@@ -74,6 +74,7 @@ private:
                               VkDeviceSize buffer_size);
     void RenderScreenshot(std::span<const Tegra::FramebufferConfig> framebuffers);
     void RenderAppletCaptureLayer(std::span<const Tegra::FramebufferConfig> framebuffers);
+    void DrawAppletCapture();
 
     std::vector<Tegra::FramebufferConfig> applet_capture_layers;
     std::vector<Tegra::FramebufferConfig> screenshot_layer_scratch;
@@ -107,6 +108,10 @@ private:
     std::optional<TurboMode> turbo_mode;
 
     Frame applet_frame;
+    /// LastFrame layers of the most recent composited frame. The applet capture is only read when
+    /// an applet starts or the app is paused, so it is drawn from these on request, not per frame.
+    std::vector<Tegra::FramebufferConfig> applet_capture_configs;
+    bool applet_capture_stale = false;
 };
 
 } // namespace Vulkan

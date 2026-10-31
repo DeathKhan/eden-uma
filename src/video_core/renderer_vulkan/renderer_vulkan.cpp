@@ -319,6 +319,9 @@ std::vector<u8> RendererVulkan::GetAppletCaptureBuffer() {
 
     std::vector<u8> out(VideoCore::Capture::TiledSize);
 
+    if (applet_capture_stale) {
+        DrawAppletCapture();
+    }
     if (!applet_frame.image) {
         return out;
     }
@@ -349,6 +352,16 @@ void RendererVulkan::RenderAppletCaptureLayer(
 
     if (capture_layers.empty())
         return;
+
+    // The buffers referenced here stay on screen, and so untouched by the guest, until the next
+    // composited frame replaces these configs. Requests run on this thread in the same order.
+    applet_capture_configs.assign(capture_layers.begin(), capture_layers.end());
+    applet_capture_stale = true;
+}
+
+void RendererVulkan::DrawAppletCapture() {
+    applet_capture_stale = false;
+    const std::span<const Tegra::FramebufferConfig> capture_layers{applet_capture_configs};
 
     if (!applet_frame.image) {
         applet_frame.image = CreateWrappedImage(memory_allocator, CaptureImageSize, CaptureFormat);
