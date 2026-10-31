@@ -495,6 +495,10 @@ public:
 
     bool InvalidateNCE(Common::ProcessAddress vaddr, size_t size);
 
+    /// Speculatively releases GPU buffer tracking of up to max_size bytes of contiguous,
+    /// rasterizer-cached memory starting at vaddr. Returns the number of bytes released.
+    size_t InvalidateNCEAhead(Common::ProcessAddress vaddr, size_t max_size);
+
     bool InvalidateSeparateHeap(void* fault_address);
 
 private:

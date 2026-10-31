@@ -90,6 +90,10 @@ public:
 
     // Stack for signal processing.
     std::unique_ptr<u8[]> m_stack{};
+
+    // Sequential write-fault detection (only touched from this core's signal handler).
+    u64 m_next_fault_addr{};
+    size_t m_fault_window{};
 };
 
 } // namespace Core

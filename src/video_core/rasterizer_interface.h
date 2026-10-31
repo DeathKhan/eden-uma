@@ -116,6 +116,12 @@ public:
 
     virtual bool OnCPUWrite(PAddr addr, u64 size) = 0;
 
+    /// Marks a buffer region CPU modified ahead of an expected write. Must not discard
+    /// GPU-modified data. Returns true if the region was released.
+    virtual bool OnCPUWriteSpeculative([[maybe_unused]] PAddr addr, [[maybe_unused]] u64 size) {
+        return false;
+    }
+
     /// Sync memory between guest and host.
     virtual void InvalidateGPUCache() = 0;
 

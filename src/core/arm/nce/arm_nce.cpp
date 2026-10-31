@@ -4,9 +4,11 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <cinttypes>
 #include <memory>
 
+#include "common/literals.h"
 #include "common/signal_chain.h"
 #include "core/arm/nce/arm_nce.h"
 #include "core/arm/nce/interpreter_visitor.h"
@@ -164,8 +166,22 @@ bool ArmNce::HandleGuestAccessFault(GuestContext* guest_ctx, void* raw_info, voi
     // TODO: handle accesses which split a page?
     const Common::ProcessAddress addr =
         (reinterpret_cast<u64>(info->si_addr) & ~Memory::YUZU_PAGEMASK);
-    auto& memory = guest_ctx->parent->m_running_thread->GetOwnerProcess()->GetMemory();
+    auto* const nce = guest_ctx->parent;
+    auto& memory = nce->m_running_thread->GetOwnerProcess()->GetMemory();
     if (memory.InvalidateNCE(addr, Memory::YUZU_PAGESIZE)) {
+        // Guest code that streams writes through GPU-tracked memory takes one fault, one
+        // invalidation and one mprotect per 4 KiB page. When a core faults on the page right
+        // after the range it last handled, unprotect a doubling window ahead of it as well.
+        constexpr size_t MaxFaultWindow = 256_KiB;
+        const u64 next = GetInteger(addr) + Memory::YUZU_PAGESIZE;
+        if (GetInteger(addr) == nce->m_next_fault_addr) {
+            nce->m_fault_window = std::clamp<size_t>(nce->m_fault_window * 2,
+                                                     Memory::YUZU_PAGESIZE, MaxFaultWindow);
+            nce->m_next_fault_addr = next + memory.InvalidateNCEAhead(next, nce->m_fault_window);
+        } else {
+            nce->m_fault_window = 0;
+            nce->m_next_fault_addr = next;
+        }
         // We handled the access successfully and are returning to guest code.
         return true;
     }

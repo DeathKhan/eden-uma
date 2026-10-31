@@ -760,6 +760,67 @@ struct Memory::Impl {
             p, scratch_buffers[core], [&](DAddr address) { gpu.InvalidateRegion(address, size); });
     }
 
+    size_t InvalidateGPUMemoryAhead(u64 vaddr, size_t max_size) {
+        // Collect guest pages that are rasterizer cached and backed by contiguous host memory.
+        u8* base = nullptr;
+        size_t size = 0;
+        while (size < max_size) {
+            const u64 page = vaddr + size;
+            if (!AddressSpaceContains(*current_page_table, page, YUZU_PAGESIZE)) {
+                break;
+            }
+            const auto raw = current_page_table->entries[page >> YUZU_PAGEBITS].Raw();
+            if (static_cast<Common::PageType>(raw.type) != Common::PageType::RasterizerCachedMemory) {
+                break;
+            }
+            u8* const ptr = GetPointerFromRasterizerCachedMemory(page);
+            if (ptr == nullptr || (base != nullptr && ptr != base + size)) {
+                break;
+            }
+            base = base ? base : ptr;
+            size += YUZU_PAGESIZE;
+        }
+        if (size == 0) {
+            return 0;
+        }
+
+        constexpr size_t sys_core = Core::Hardware::NUM_CPU_CORES - 1;
+        const size_t core = (std::min)(system.GetCurrentHostThreadID(), sys_core);
+        if (!gpu_device_memory) [[unlikely]] {
+            gpu_device_memory = &system.Host1x().MemoryManager();
+        }
+        if (core == sys_core) [[unlikely]] {
+            sys_core_guard.lock();
+        }
+        SCOPE_EXIT {
+            if (core == sys_core) [[unlikely]] {
+                sys_core_guard.unlock();
+            }
+        };
+
+        // Keep only the prefix that maps to a single, contiguous device range.
+        DAddr device_base = 0;
+        size_t device_size = 0;
+        while (device_size < size) {
+            u32 count = 0;
+            DAddr device_addr = 0;
+            gpu_device_memory->ApplyOpOnPointer(base + device_size, scratch_buffers[core],
+                                                [&](DAddr address) {
+                                                    ++count;
+                                                    device_addr = address;
+                                                });
+            if (count != 1 || (device_size != 0 && device_addr != device_base + device_size)) {
+                break;
+            }
+            device_base = device_size == 0 ? device_addr : device_base;
+            device_size += YUZU_PAGESIZE;
+        }
+        if (device_size == 0 || !system.GPU().OnCPUWriteSpeculative(device_base, device_size)) {
+            return 0;
+        }
+        return device_size;
+    }
+
     Core::System& system;
     Tegra::MaxwellDeviceMemoryManager* gpu_device_memory{};
     Common::PageTable* current_page_table = nullptr;
@@ -984,6 +1045,10 @@ bool Memory::InvalidateNCE(Common::ProcessAddress vaddr, size_t size) {
 #endif
 
     return mapped && ptr != nullptr;
+}
+
+size_t Memory::InvalidateNCEAhead(Common::ProcessAddress vaddr, size_t max_size) {
+    return impl->InvalidateGPUMemoryAhead(GetInteger(vaddr), max_size);
 }
 
 bool Memory::InvalidateSeparateHeap(void* fault_address) {

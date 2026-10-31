@@ -787,6 +787,17 @@ bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {
     return false;
 }
 
+bool RasterizerVulkan::OnCPUWriteSpeculative(DAddr addr, u64 size) {
+    // Only the buffer cache is released: texture and shader tracking keep their pages protected,
+    // so a real write to them still faults and invalidates them.
+    std::scoped_lock lock{buffer_cache.mutex};
+    if (!buffer_cache.IsRegionRegistered(addr, size) || buffer_cache.IsRegionGpuModified(addr, size)) {
+        return false;
+    }
+    buffer_cache.WriteMemory(addr, size);
+    return true;
+}
+
 void RasterizerVulkan::OnCacheInvalidation(DAddr addr, u64 size) {
     if (addr == 0 || size == 0) {
         return;
