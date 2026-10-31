@@ -36,6 +36,28 @@ void incrpdep(u32& value) {
     value = ((value | ~mask) + swizzled_incr) & mask;
 }
 
+// Within a 64-byte GOB row, linear byte bits 0-3 map to address bits 0-3 unchanged, bit 4 to bit 5
+// and bit 5 to bit 8. Every 16-byte aligned run of a row is therefore contiguous in the swizzled
+// layout, at these offsets from the start of its GOB row.
+constexpr std::array<u32, 4> SWIZZLED_16B_RUN{
+    pdep<SWIZZLE_X_BITS>(0), pdep<SWIZZLE_X_BITS>(16), pdep<SWIZZLE_X_BITS>(32),
+    pdep<SWIZZLE_X_BITS>(48)};
+
+/// Copies the 16-byte aligned runs of one row in [x_begin, x_end) (absolute linear byte offsets,
+/// both multiples of 16) instead of going texel by texel.
+template <bool TO_LINEAR>
+void SwizzleRow16(u8* output, const u8* input, u32 x_begin, u32 x_end, u32 row_swizzled,
+                  u32 row_linear, u32 x_shift) {
+    for (u32 x = x_begin; x < x_end; x += 16) {
+        const u32 swizzled_offset =
+            row_swizzled + ((x >> GOB_SIZE_X_SHIFT) << x_shift) + SWIZZLED_16B_RUN[(x >> 4) & 3];
+        const u32 unswizzled_offset = row_linear + (x - x_begin);
+        u8* const dst = output + (TO_LINEAR ? swizzled_offset : unswizzled_offset);
+        const u8* const src = input + (TO_LINEAR ? unswizzled_offset : swizzled_offset);
+        std::memcpy(dst, src, 16);
+    }
+}
+
 template <bool TO_LINEAR, u32 BYTES_PER_PIXEL>
 void SwizzleImpl(std::span<u8> output, std::span<const u8> input, u32 width, u32 height, u32 depth,
                  u32 block_height, u32 block_depth, u32 stride) {
@@ -70,8 +92,17 @@ void SwizzleImpl(std::span<u8> output, std::span<const u8> input, u32 width, u32
             const u32 offset_y = (block_y >> block_height) * block_size +
                                  ((block_y & block_height_mask) << GOB_SIZE_SHIFT);
 
+            u32 column = 0;
             u32 swizzled_x = pdep<SWIZZLE_X_BITS>(origin_x * BYTES_PER_PIXEL);
-            for (u32 column = 0; column < width;
+            if constexpr (origin_x == 0 && 16 % BYTES_PER_PIXEL == 0) {
+                const u32 run_end = pitch & ~15U;
+                SwizzleRow16<TO_LINEAR>(output.data(), input.data(), 0, run_end,
+                                        offset_z + offset_y + swizzled_y,
+                                        slice * pitch * height + line * pitch, x_shift);
+                column = run_end / BYTES_PER_PIXEL;
+                swizzled_x = pdep<SWIZZLE_X_BITS>(run_end);
+            }
+            for (; column < width;
                  ++column, incrpdep<SWIZZLE_X_BITS, BYTES_PER_PIXEL>(swizzled_x)) {
                 const u32 x = (column + origin_x) * BYTES_PER_PIXEL;
                 const u32 offset_x = (x >> GOB_SIZE_X_SHIFT) << x_shift;
@@ -129,23 +160,42 @@ void SwizzleSubrectImpl(std::span<u8> output, std::span<const u8> input, u32 wid
             const u32 offset_y = (block_y >> block_height) * block_size +
                                  ((block_y & block_height_mask) << GOB_SIZE_SHIFT);
 
+            u32 column = 0;
             u32 swizzled_x = pdep<SWIZZLE_X_BITS>(origin_x * BYTES_PER_PIXEL);
-            for (u32 column = 0; column < extent_x;
-                 ++column, incrpdep<SWIZZLE_X_BITS, BYTES_PER_PIXEL>(swizzled_x)) {
-                const u32 x = (column + origin_x) * BYTES_PER_PIXEL;
-                const u32 offset_x = (x >> GOB_SIZE_X_SHIFT) << x_shift;
+            const auto copy_texels = [&](u32 end_column) {
+                for (; column < end_column;
+                     ++column, incrpdep<SWIZZLE_X_BITS, BYTES_PER_PIXEL>(swizzled_x)) {
+                    const u32 x = (column + origin_x) * BYTES_PER_PIXEL;
+                    const u32 offset_x = (x >> GOB_SIZE_X_SHIFT) << x_shift;
 
-                const u32 base_swizzled_offset = offset_z + offset_y + offset_x;
-                const u32 swizzled_offset = base_swizzled_offset + (swizzled_x | swizzled_y);
+                    const u32 base_swizzled_offset = offset_z + offset_y + offset_x;
+                    const u32 swizzled_offset = base_swizzled_offset + (swizzled_x | swizzled_y);
 
-                const u32 unswizzled_offset =
-                    slice * pitch * height + line * pitch + column * BYTES_PER_PIXEL;
+                    const u32 unswizzled_offset =
+                        slice * pitch * height + line * pitch + column * BYTES_PER_PIXEL;
 
-                u8* const dst = &output[TO_LINEAR ? swizzled_offset : unswizzled_offset];
-                const u8* const src = &input[TO_LINEAR ? unswizzled_offset : swizzled_offset];
+                    u8* const dst = &output[TO_LINEAR ? swizzled_offset : unswizzled_offset];
+                    const u8* const src = &input[TO_LINEAR ? unswizzled_offset : swizzled_offset];
 
-                std::memcpy(dst, src, BYTES_PER_PIXEL);
+                    std::memcpy(dst, src, BYTES_PER_PIXEL);
+                }
+            };
+            if constexpr (16 % BYTES_PER_PIXEL == 0) {
+                // Unaligned head texel by texel, then whole 16-byte runs, then the tail.
+                const u32 x_begin = origin_x * BYTES_PER_PIXEL;
+                const u32 x_end = (origin_x + extent_x) * BYTES_PER_PIXEL;
+                const u32 run_begin = (std::min)(Common::AlignUp(x_begin, 16U), x_end);
+                const u32 run_end = run_begin + ((x_end - run_begin) & ~15U);
+                copy_texels((run_begin - x_begin) / BYTES_PER_PIXEL);
+                SwizzleRow16<TO_LINEAR>(output.data(), input.data(), run_begin, run_end,
+                                        offset_z + offset_y + swizzled_y,
+                                        slice * pitch * height + line * pitch +
+                                            (run_begin - x_begin),
+                                        x_shift);
+                column = (run_end - x_begin) / BYTES_PER_PIXEL;
+                swizzled_x = pdep<SWIZZLE_X_BITS>(run_end);
             }
+            copy_texels(extent_x);
         }
         unprocessed_lines -= lines_in_y;
         if (unprocessed_lines == 0) {
