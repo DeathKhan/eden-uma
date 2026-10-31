@@ -7,6 +7,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstring>
 #include <vector>
 
 #include "common/alignment.h"
@@ -22,6 +23,8 @@ template <typename T>
 class DescriptorTable {
 public:
     [[nodiscard]] bool Synchronize(GPUVAddr gpu_addr, u32 limit) noexcept {
+        // Called once per draw/dispatch: drop the page pointer so mapping changes are picked up.
+        cached_page = INVALID_PAGE;
         bool ret = !(current_gpu_addr == gpu_addr && current_limit == limit);
         if (ret) {
             Refresh(gpu_addr, limit);
@@ -37,7 +40,19 @@ public:
         DEBUG_ASSERT(index <= current_limit);
         const GPUVAddr gpu_addr = current_gpu_addr + index * sizeof(T);
         std::pair<T, bool> result;
-        gpu_memory.ReadBlockUnsafe(gpu_addr, std::addressof(result.first), sizeof(T));
+        // Every bound descriptor is re-read on every draw. Instead of a full GPU page-table walk
+        // and memcpy call per 32-byte entry, translate the containing 4 KiB page once per draw
+        // and copy the entry inline.
+        const GPUVAddr page = gpu_addr & ~PAGE_MASK;
+        if (page != cached_page) {
+            cached_page = page;
+            cached_ptr = gpu_memory.GetPointer(page);
+        }
+        if (cached_ptr != nullptr && (gpu_addr & PAGE_MASK) + sizeof(T) <= PAGE_MASK + 1) [[likely]] {
+            std::memcpy(std::addressof(result.first), cached_ptr + (gpu_addr & PAGE_MASK), sizeof(T));
+        } else {
+            gpu_memory.ReadBlockUnsafe(gpu_addr, std::addressof(result.first), sizeof(T));
+        }
         if ((read_descriptors[index / 64] & (1ULL << (index % 64))) != 0) {
             result.second = result.first != descriptors[index];
         } else {
@@ -68,6 +83,12 @@ public:
     std::vector<T> descriptors;
     GPUVAddr current_gpu_addr{};
     u32 current_limit{};
+
+private:
+    static constexpr GPUVAddr PAGE_MASK = 0xfff;
+    static constexpr GPUVAddr INVALID_PAGE = ~GPUVAddr{0};
+    GPUVAddr cached_page = INVALID_PAGE;
+    const u8* cached_ptr = nullptr;
 };
 
 } // namespace VideoCommon
