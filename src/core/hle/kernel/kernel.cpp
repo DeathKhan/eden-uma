@@ -52,8 +52,9 @@
 namespace Kernel {
 
 // Can only be used by a single implementation PER THREAD
+// Kept trivially constructible and destructible so every access is a plain TLS load instead of a
+// call through the thread_local init wrapper; the dummy thread storage lives in tls_raw_thread.
 struct ThreadLocalData {
-    std::optional<KThread> raw_thread;
     KThread* current_thread = nullptr;
     KThread* thread = nullptr;
     u8 host_thread_id = UINT8_MAX;
@@ -78,7 +79,9 @@ struct KernelCore::Impl {
     // And we have the guarantee that the data won't move out of the way so we can safely
     // take a reference to it. This isn't always universally true but this is "global" data
     // so it will be statically given a TLS slot anyways.
-    static inline thread_local ThreadLocalData tls_data = {};
+    static inline constinit thread_local ThreadLocalData tls_data = {};
+    // Only touched when a host thread first needs a dummy KThread.
+    static inline thread_local std::unique_ptr<KThread> tls_raw_thread;
 
     explicit Impl(Core::System& system_, KernelCore& kernel_) : system{system_} {
         tls_data.lock = true;
@@ -387,8 +390,8 @@ struct KernelCore::Impl {
                 ASSERT(KThread::InitializeDummyThread(system, thread, nullptr).IsSuccess());
                 return thread;
             };
-            t.raw_thread.emplace(system.Kernel());
-            t.thread = existing_thread ? existing_thread : initialize(&*t.raw_thread);
+            tls_raw_thread = std::make_unique<KThread>(system.Kernel());
+            t.thread = existing_thread ? existing_thread : initialize(tls_raw_thread.get());
             ASSERT(t.thread != nullptr);
         }
         return t.thread;
