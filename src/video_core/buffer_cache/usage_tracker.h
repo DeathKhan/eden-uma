@@ -26,13 +26,19 @@ public:
     }
 
     void Reset() noexcept {
+        // TickFrame resets every idle buffer each frame; most were already reset and untouched.
+        if (!has_usage) {
+            return;
+        }
         std::ranges::fill(pages, 0ULL);
+        has_usage = false;
     }
 
     /// Marks the 64-byte units overlapping the byte range [offset, offset + size) as used.
     void Track(u64 offset, u64 size) noexcept {
         ForEachPageMask(offset, size, [this](size_t page, u64 mask) {
             pages[page] |= mask;
+            has_usage = true;
             return false;
         });
     }
@@ -83,6 +89,7 @@ private:
 
 private:
     std::vector<u64> pages;
+    bool has_usage = false;
 };
 
 } // namespace VideoCommon

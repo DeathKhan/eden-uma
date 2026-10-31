@@ -60,3 +60,17 @@ TEST_CASE("UsageTracker: matches a 64-byte unit reference model", "[video_core]"
         }
     }
 }
+
+TEST_CASE("UsageTracker: reset clears tracked usage", "[video_core]") {
+    UsageTracker tracker{8192};
+    tracker.Reset();
+    REQUIRE(!tracker.IsUsed(0, 8192));
+    tracker.Track(100, 5000);
+    REQUIRE(tracker.IsUsed(4096, 1));
+    tracker.Reset();
+    REQUIRE(!tracker.IsUsed(0, 8192));
+    tracker.Reset();
+    tracker.Track(8000, 10);
+    REQUIRE(tracker.IsUsed(8000, 1));
+    REQUIRE(!tracker.IsUsed(0, 7936));
+}
