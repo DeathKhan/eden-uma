@@ -279,6 +279,8 @@ GraphicsPipeline::GraphicsPipeline(
         num_descriptor_entries += NumDescriptorEntries(*info);
     }
     fragment_has_color0_output = stage_infos[NUM_STAGES - 1].stores_frag_color[0];
+    uses_rescaling_uniform = std::ranges::any_of(
+        stage_infos, [](const Shader::Info& info) { return info.uses_rescaling_uniform; });
 
     DescriptorLayoutBuilder builder{MakeBuilder(device, stage_infos)};
     uses_push_descriptor = builder.CanUsePushDescriptor();
@@ -631,6 +633,7 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
     scheduler.Record([this, descriptor_data, bind_pipeline, update_descriptors,
                       descriptor_buffer_offset, descriptor_buffer_chunk, bind_descriptor_buffer,
                       rescaling_data = rescaling.Data(), is_rescaling, update_rescaling,
+                      push_rescaling = uses_rescaling_uniform,
                       uses_render_area = render_area.uses_render_area,
                       render_area_data = render_area.words](vk::CommandBuffer cmdbuf) {
         if (bind_descriptor_buffer) {
@@ -644,9 +647,14 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
             }
             cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, *pipeline);
         }
-        cmdbuf.PushConstants(*pipeline_layout, VK_SHADER_STAGE_ALL_GRAPHICS,
-                             RESCALING_LAYOUT_WORDS_OFFSET, sizeof(rescaling_data),
-                             rescaling_data.data());
+        // No stage reads the scaling mask: skip the push. Each push also makes the driver
+        // re-emit constant state on the next draw (Turnip dirties all shader constants). Pipelines
+        // that do read it push their own values on every draw, so nothing goes stale.
+        if (push_rescaling) {
+            cmdbuf.PushConstants(*pipeline_layout, VK_SHADER_STAGE_ALL_GRAPHICS,
+                                 RESCALING_LAYOUT_WORDS_OFFSET, sizeof(rescaling_data),
+                                 rescaling_data.data());
+        }
         if (update_rescaling) {
             const f32 config_down_factor{Settings::values.resolution_info.down_factor};
             const f32 scale_down_factor{is_rescaling ? config_down_factor : 1.0f};

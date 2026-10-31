@@ -186,6 +186,8 @@ private:
     std::mutex build_mutex;
     std::atomic_bool is_built{false};
     bool uses_push_descriptor{false};
+    /// True when any stage reads the texture/image rescaling words.
+    bool uses_rescaling_uniform{false};
     bool uses_descriptor_buffer{false};
 };
 
