@@ -174,7 +174,7 @@ bool ArmNce::HandleGuestAccessFault(GuestContext* guest_ctx, void* raw_info, voi
         // after the range it last handled, unprotect a doubling window ahead of it as well.
         constexpr size_t MaxFaultWindow = 256_KiB;
         // A forward jump of at most this far in an active stream keeps the window (halved).
-        constexpr u64 MaxForwardJump = 256_KiB;
+        constexpr u64 MaxForwardJump = 1_MiB;
         const u64 fault = GetInteger(addr);
         const u64 next = fault + Memory::YUZU_PAGESIZE;
         if (fault == nce->m_next_fault_addr) {
