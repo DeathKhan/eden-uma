@@ -2854,19 +2854,20 @@ Sampler::Sampler(TextureCacheRuntime& runtime, const Tegra::Texture::TSCEntry& t
 
 Sampler::VariantKey Sampler::MakeKey(const ImageView& image_view, bool is_depth) const noexcept {
     VariantKey key{};
-    key.reduce_anisotropy = has_added_anisotropy && !image_view.SupportsAnisotropy();
-    key.force_nearest = has_linear_filtering && IsPixelFormatInteger(image_view.format);
-    key.drop_reduction = has_minmax_reduction && !image_view.SupportsMinmaxFilter();
-    key.drop_custom_border = has_custom_border_colors && image_view.RequiresBorderColorFormat();
-    key.srgb_border = has_srgb_border_color && IsPixelFormatSRGB(image_view.format);
-    if (needs_swizzle_mapping && !key.drop_custom_border && !image_view.HasIdentitySwizzle()) {
-        const VkComponentMapping& mapping = image_view.Swizzle();
-        key.swizzle = {mapping.r, mapping.g, mapping.b, mapping.a};
+    key.Set(VariantKey::ReduceAnisotropy, has_added_anisotropy && !image_view.SupportsAnisotropy());
+    key.Set(VariantKey::ForceNearest, has_linear_filtering && IsPixelFormatInteger(image_view.format));
+    key.Set(VariantKey::DropReduction, has_minmax_reduction && !image_view.SupportsMinmaxFilter());
+    key.Set(VariantKey::DropCustomBorder,
+            has_custom_border_colors && image_view.RequiresBorderColorFormat());
+    key.Set(VariantKey::SrgbBorder, has_srgb_border_color && IsPixelFormatSRGB(image_view.format));
+    if (needs_swizzle_mapping && !key.Test(VariantKey::DropCustomBorder) &&
+        !image_view.HasIdentitySwizzle()) {
+        key.SetSwizzle(image_view.Swizzle());
     }
     return key;
 }
 
-VkSampler Sampler::Find(const VariantKey& key) const noexcept {
+VkSampler Sampler::Find(VariantKey key) const noexcept {
     const auto it = std::ranges::find(variants, key, &Variant::key);
     if (it == variants.end()) {
         return VK_NULL_HANDLE;
@@ -2875,22 +2876,22 @@ VkSampler Sampler::Find(const VariantKey& key) const noexcept {
 }
 
 VkSampler Sampler::Emplace(VariantKey key) {
-    bool custom_border = has_custom_border_colors && !key.drop_custom_border;
+    bool custom_border = has_custom_border_colors && !key.Test(VariantKey::DropCustomBorder);
     if (custom_border && !custom_border_color_budget.TryAcquire(*device_ptr, 1)) {
         static bool warned_budget = false;
         if (!warned_budget) {
             warned_budget = true;
         }
         custom_border = false;
-        key.drop_custom_border = true;
-        key.swizzle = {};
+        key.Set(VariantKey::DropCustomBorder, true);
+        key.ClearSwizzle();
         if (const VkSampler existing = Find(key); existing != VK_NULL_HANDLE) {
             return existing;
         }
     }
 
     std::array<float, 4> color = border_color;
-    if (key.srgb_border) {
+    if (key.Test(VariantKey::SrgbBorder)) {
         color = srgb_border_color;
     }
     const VkSamplerCustomBorderColorCreateInfoEXT border_ci{
@@ -2902,7 +2903,7 @@ VkSampler Sampler::Emplace(VariantKey key) {
     const VkSamplerBorderColorComponentMappingCreateInfoEXT mapping_ci{
         .sType = VK_STRUCTURE_TYPE_SAMPLER_BORDER_COLOR_COMPONENT_MAPPING_CREATE_INFO_EXT,
         .pNext = &border_ci,
-        .components{key.swizzle[0], key.swizzle[1], key.swizzle[2], key.swizzle[3]},
+        .components = key.Swizzle(),
         .srgb = VK_FALSE,
     };
     const void* chain = nullptr;
@@ -2917,19 +2918,19 @@ VkSampler Sampler::Emplace(VariantKey key) {
         .pNext = chain,
         .reductionMode = reduction_mode,
     };
-    if (has_minmax_reduction && !key.drop_reduction) {
+    if (has_minmax_reduction && !key.Test(VariantKey::DropReduction)) {
         chain = &reduction_ci;
     }
 
     VkSamplerCreateInfo create_info = base_ci;
     create_info.pNext = chain;
-    if (key.force_nearest) {
+    if (key.Test(VariantKey::ForceNearest)) {
         create_info.magFilter = VK_FILTER_NEAREST;
         create_info.minFilter = VK_FILTER_NEAREST;
         create_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
         create_info.anisotropyEnable = VK_FALSE;
         create_info.maxAnisotropy = 1.0f;
-    } else if (key.reduce_anisotropy) {
+    } else if (key.Test(VariantKey::ReduceAnisotropy)) {
         create_info.anisotropyEnable = static_cast<VkBool32>(default_anisotropy > 1.0f);
         create_info.maxAnisotropy = default_anisotropy;
     }
@@ -2946,8 +2947,8 @@ VkSampler Sampler::Emplace(VariantKey key) {
 VkSampler Sampler::HandleFor(const ImageView& image_view, bool is_depth) {
     VariantKey key = MakeKey(image_view, is_depth);
     if (variants.size() >= MAX_VARIANTS) {
-        key.srgb_border = false;
-        key.swizzle = {};
+        key.Set(VariantKey::SrgbBorder, false);
+        key.ClearSwizzle();
     }
     if (const VkSampler existing = Find(key); existing != VK_NULL_HANDLE) {
         return existing;

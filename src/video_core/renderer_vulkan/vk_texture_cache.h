@@ -13,6 +13,7 @@
 #include "shader_recompiler/shader_info.h"
 #include "video_core/renderer_vulkan/vk_compute_pass.h"
 #include "video_core/renderer_vulkan/vk_render_pass_cache.h"
+#include "video_core/renderer_vulkan/vk_sampler_variant_key.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/texture_cache/image_view_base.h"
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
@@ -533,20 +534,7 @@ public:
     [[nodiscard]] VkSampler HandleFor(const ImageView& image_view, bool is_depth);
 
 private:
-    struct VariantKey {
-        bool reduce_anisotropy;
-        bool force_nearest;
-        bool drop_reduction;
-        bool drop_custom_border;
-        bool srgb_border;
-        std::array<VkComponentSwizzle, 4> swizzle;
-
-        bool operator==(const VariantKey&) const noexcept = default;
-
-        [[nodiscard]] bool HasSwizzle() const noexcept {
-            return swizzle != std::array<VkComponentSwizzle, 4>{};
-        }
-    };
+    using VariantKey = SamplerVariantKey;
 
     struct Variant {
         VariantKey key;
@@ -556,7 +544,7 @@ private:
     static constexpr size_t MAX_VARIANTS = 32;
 
     [[nodiscard]] VariantKey MakeKey(const ImageView& image_view, bool is_depth) const noexcept;
-    [[nodiscard]] VkSampler Find(const VariantKey& key) const noexcept;
+    [[nodiscard]] VkSampler Find(VariantKey key) const noexcept;
     VkSampler Emplace(VariantKey key);
 
     CustomBorderColorBudget custom_border_color_budget;

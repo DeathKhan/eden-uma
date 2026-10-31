@@ -20,6 +20,7 @@ add_executable(tests
     core/internal_network/network.cpp
     video_core/memory_tracker.cpp
     video_core/sampler_lookup_cache.cpp
+    video_core/sampler_variant_key.cpp
     video_core/usage_tracker.cpp
     input_common/calibration_configuration_job.cpp
 )
