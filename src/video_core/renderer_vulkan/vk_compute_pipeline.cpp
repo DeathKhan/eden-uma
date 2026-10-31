@@ -19,6 +19,7 @@
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
 #include "video_core/shader_notify.h"
+#include "video_core/texture_cache/sampler_lookup_cache.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/gpu_logging/gpu_logging.h"
@@ -164,6 +165,7 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     }
 
     texture_cache.SynchronizeDescriptors(true);
+    VideoCommon::SamplerLookupCache sampler_lookup;
 
     boost::container::small_vector<VideoCommon::ImageViewInOut, 64> views;
     boost::container::small_vector<VideoCommon::SamplerId, 64> samplers;
@@ -211,7 +213,9 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
             const auto handle{read_handle(desc, index)};
             views.push_back({handle.first});
 
-            VideoCommon::SamplerId sampler = texture_cache.GetSamplerId(handle.second, true);
+            const auto sampler = sampler_lookup.Get(handle.second, [&](u32 sampler_index) {
+                return texture_cache.GetSamplerId(sampler_index, true);
+            });
             samplers.push_back(sampler);
         }
     }

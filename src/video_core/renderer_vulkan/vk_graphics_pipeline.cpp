@@ -25,6 +25,7 @@
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
 #include "video_core/shader_notify.h"
+#include "video_core/texture_cache/sampler_lookup_cache.h"
 #include "video_core/texture_cache/texture_cache.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/gpu_logging/gpu_logging.h"
@@ -358,6 +359,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     samplers.reserve(num_textures);
 
     texture_cache.SynchronizeDescriptors(false);
+    VideoCommon::SamplerLookupCache sampler_lookup;
 
     buffer_cache.SetUniformBuffersState(enabled_uniform_buffer_masks, &uniform_buffer_sizes);
 
@@ -422,7 +424,9 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                 const auto handle{read_handle(desc, index)};
                 views.push_back({handle.first});
 
-                VideoCommon::SamplerId sampler{texture_cache.GetSamplerId(handle.second, false)};
+                const auto sampler = sampler_lookup.Get(handle.second, [&](u32 sampler_index) {
+                    return texture_cache.GetSamplerId(sampler_index, false);
+                });
                 samplers.push_back(sampler);
             }
         }
