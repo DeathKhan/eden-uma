@@ -107,6 +107,7 @@ void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass
     const VkFramebuffer framebuffer_handle = framebuffer->Handle();
     const VkExtent2D render_area = framebuffer->RenderArea();
     state.renderpass = renderpass;
+    state.base_renderpass = renderpass;
     state.framebuffer = framebuffer_handle;
     state.render_area = render_area;
 
@@ -171,6 +172,12 @@ void Scheduler::RealizeDeferredClear() {
         dc.color_clear_mask, dc.depth_stencil, color_discard_mask, depth_stencil_discard);
     EndRenderPass();
     BeginRenderPassImpl(dc.framebuffer, renderpass, clear_values.data(), count);
+    // A variant that only clears differs from the base pass in load ops alone, so it is
+    // compatible and the next draws on this framebuffer can stay in it instead of ending it and
+    // reloading the attachments. Variants that discard on store are not equivalent.
+    if (color_discard_mask == 0 && !depth_stencil_discard) {
+        state.base_renderpass = dc.framebuffer->RenderPass();
+    }
 }
 
 bool Scheduler::DeferColorClear(const Framebuffer* framebuffer, u32 rt_slot,
@@ -218,7 +225,8 @@ void Scheduler::RequestRenderpass(const Framebuffer* framebuffer) {
     const VkRenderPass renderpass = framebuffer->RenderPass();
     const VkFramebuffer framebuffer_handle = framebuffer->Handle();
     const VkExtent2D render_area = framebuffer->RenderArea();
-    if (renderpass == state.renderpass && framebuffer_handle == state.framebuffer &&
+    if ((renderpass == state.renderpass || renderpass == state.base_renderpass) &&
+        framebuffer_handle == state.framebuffer &&
         render_area.width == state.render_area.width &&
         render_area.height == state.render_area.height) {
         return;
@@ -493,6 +501,7 @@ void Scheduler::EndRenderPass()
         });
 
         state.renderpass = VkRenderPass{};
+        state.base_renderpass = VkRenderPass{};
         num_renderpass_images = 0;
     }
 

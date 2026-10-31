@@ -256,6 +256,9 @@ private:
 
     struct State {
         VkRenderPass renderpass{};
+        /// Load-op variant equivalent of the active pass: the framebuffer's base render pass when
+        /// a clear-only variant was begun, so later draws on the same framebuffer keep using it.
+        VkRenderPass base_renderpass{};
         VkFramebuffer framebuffer{};
         VkExtent2D render_area = {0, 0};
         GraphicsPipeline* graphics_pipeline = nullptr;
