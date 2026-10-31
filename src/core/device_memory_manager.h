@@ -126,6 +126,10 @@ public:
     // New batch API to update multiple ranges with a single lock acquisition.
     void UpdatePagesCachedBatch(std::span<const std::pair<DAddr, size_t>> ranges, s32 delta);
 
+    /// Same as UpdatePagesCachedBatch for ranges that are already in ascending order, disjoint and
+    /// not adjacent to each other (e.g. produced by the buffer cache's word manager).
+    void UpdatePagesCachedSortedBatch(std::span<const std::pair<DAddr, size_t>> ranges, s32 delta);
+
 private:
     struct TranslationEntry {
         DAddr guest_page{};

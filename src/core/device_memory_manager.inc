@@ -657,4 +657,17 @@ void DeviceMemoryManager<Traits>::UpdatePagesCachedBatch(std::span<const std::pa
     }
 }
 
+template <typename Traits>
+void DeviceMemoryManager<Traits>::UpdatePagesCachedSortedBatch(std::span<const std::pair<DAddr, size_t>> ranges, s32 delta) {
+    if (ranges.empty()) {
+        return;
+    }
+    const DAddr lock_begin = ranges.front().first;
+    const DAddr lock_end = ranges.back().first + ranges.back().second;
+    Common::ScopedRangeLock lk(counter_guard, lock_begin, static_cast<size_t>(lock_end - lock_begin));
+    for (const auto& [addr, size] : ranges) {
+        UpdatePagesCachedCountNoLock(addr, size, delta);
+    }
+}
+
 } // namespace Core

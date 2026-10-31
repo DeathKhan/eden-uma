@@ -31,6 +31,10 @@ public:
     void UpdatePagesCachedCount(DAddr addr, size_t size, s32 delta) {
         ++update_calls;
         calls.emplace_back(addr, size, delta);
+        ApplyDelta(addr, size, delta);
+    }
+
+    void ApplyDelta(DAddr addr, size_t size, s32 delta) {
         const u64 page_start{addr >> Core::DEVICE_PAGEBITS};
         const u64 page_end{(addr + size + Core::DEVICE_PAGESIZE - 1) >> Core::DEVICE_PAGEBITS};
         for (u64 page = page_start; page < page_end; ++page) {
@@ -44,9 +48,22 @@ public:
         }
     }
 
-    void UpdatePagesCachedBatch(std::span<const std::pair<DAddr, size_t>> ranges, s32 delta) {
-        // TODO: for now assume fine?
+    void UpdatePagesCachedSortedBatch(std::span<const std::pair<DAddr, size_t>> ranges, s32 delta) {
+        ++batch_calls;
+        batches.emplace_back(ranges.begin(), ranges.end());
+        for (size_t i = 0; i < ranges.size(); ++i) {
+            if (ranges[i].second == 0) {
+                throw std::logic_error{"empty range in batch"};
+            }
+            if (i > 0 && ranges[i - 1].first + ranges[i - 1].second >= ranges[i].first) {
+                throw std::logic_error{"batch ranges not sorted, disjoint and coalesced"};
+            }
+            ApplyDelta(ranges[i].first, ranges[i].second, delta);
+        }
     }
+
+    [[nodiscard]] size_t BatchCalls() const noexcept { return batch_calls; }
+    [[nodiscard]] const std::vector<std::vector<std::pair<DAddr, size_t>>>& Batches() const noexcept { return batches; }
 
     [[nodiscard]] size_t UpdateCalls() const noexcept { return update_calls; }
     [[nodiscard]] const std::vector<std::tuple<DAddr, u64, int>>& UpdateCallsList() const noexcept { return calls; }
@@ -67,7 +84,9 @@ public:
 private:
     ::Common::unordered_map<u64, int> page_table;
     std::vector<std::tuple<DAddr, u64, int>> calls;
+    std::vector<std::vector<std::pair<DAddr, size_t>>> batches;
     size_t update_calls = 0;
+    size_t batch_calls = 0;
 };
 
 } // Anonymous namespace
@@ -561,16 +580,40 @@ TEST_CASE("MemoryTracker: FlushCachedWrites batching") {
     RasterizerInterface rasterizer;
     std::optional<MemoryTracker> memory_track(rasterizer);
     memory_track->UnmarkRegionAsCpuModified(c, WORD * 2);
+    // Two words of tracking go to the device tracker as one coalesced run, across the word boundary.
+    REQUIRE(rasterizer.BatchCalls() == 1);
+    REQUIRE(rasterizer.Batches()[0] == std::vector<std::pair<DAddr, size_t>>{{c, WORD * 2}});
+    REQUIRE(rasterizer.Count() == 128);
+    // A cached CPU write stops tracking its pages right away (one batch each)...
     memory_track->CachedCpuWrite(c + PAGE, PAGE);
     memory_track->CachedCpuWrite(c + PAGE * 2, PAGE);
     memory_track->CachedCpuWrite(c + PAGE * 4, PAGE);
-    REQUIRE(rasterizer.UpdateCalls() == 0);
+    REQUIRE(rasterizer.BatchCalls() == 4);
+    REQUIRE(rasterizer.Count() == 125);
+    REQUIRE(!memory_track->IsRegionCpuModified(c + PAGE, PAGE));
+    // ...so flushing only turns the pages CPU modified and has nothing to tell the tracker.
     memory_track->FlushCachedWrites();
-    // Now we expect a single batch call (coalesced ranges) to the device memory manager
-    REQUIRE(rasterizer.UpdateCalls() == 1);
-    const auto& calls = rasterizer.UpdateCallsList();
-    REQUIRE(std::get<0>(calls[0]) == c + PAGE);
-    REQUIRE(std::get<1>(calls[0]) == PAGE * 3);
+    REQUIRE(rasterizer.BatchCalls() == 4);
+    REQUIRE(rasterizer.Count() == 125);
+    REQUIRE(memory_track->IsRegionCpuModified(c + PAGE, PAGE * 2));
+    REQUIRE(!memory_track->IsRegionCpuModified(c + PAGE * 3, PAGE));
+    REQUIRE(memory_track->IsRegionCpuModified(c + PAGE * 4, PAGE));
+    REQUIRE(rasterizer.UpdateCalls() == 0);
+}
+
+TEST_CASE("MemoryTracker: sparse changes are one sorted batch") {
+    RasterizerInterface rasterizer;
+    std::optional<MemoryTracker> memory_track(rasterizer);
+    memory_track->UnmarkRegionAsCpuModified(c, WORD * 3);
+    REQUIRE(rasterizer.Count() == 192);
+    // Re-marking a span that is partly untracked again only reports the tracked pages, in order.
+    memory_track->MarkRegionAsCpuModified(c + PAGE * 10, PAGE);
+    memory_track->MarkRegionAsCpuModified(c + WORD + PAGE * 63, PAGE * 2);
+    REQUIRE(rasterizer.Count() == 189);
+    memory_track->UnmarkRegionAsCpuModified(c, WORD * 3);
+    REQUIRE(rasterizer.Count() == 192);
+    const auto& last = rasterizer.Batches().back();
+    REQUIRE(last == std::vector<std::pair<DAddr, size_t>>{{c + PAGE * 10, PAGE}, {c + WORD + PAGE * 63, PAGE * 2}});
 }
 
 TEST_CASE("DeviceMemoryManager: UpdatePagesCachedBatch basic") {
