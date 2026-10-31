@@ -264,12 +264,20 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
     draw_func();
 }
 
+void RasterizerVulkan::MarkDepthStencilWrites() {
+    const auto& regs = maxwell3d->regs;
+    if (regs.zeta_enable != 0 && (regs.depth_write_enabled != 0 || regs.stencil_enable != 0)) {
+        scheduler.MarkRenderPassDepthWrite();
+    }
+}
+
 void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
     PrepareDraw(is_indexed, [this, is_indexed, instance_count] {
         const auto& draw_state = maxwell3d->draw_manager.draw_state;
         const u32 num_instances{instance_count};
         const DrawParams draw_params{MakeDrawParams(draw_state, num_instances, is_indexed)};
 
+        MarkDepthStencilWrites();
         scheduler.Record([draw_params](vk::CommandBuffer cmdbuf) {
             if (draw_params.is_indexed) {
                 cmdbuf.DrawIndexed(draw_params.num_vertices, draw_params.num_instances,
@@ -301,6 +309,7 @@ void RasterizerVulkan::DrawIndirect() {
     const auto& params = maxwell3d->draw_manager.indirect_state;
     buffer_cache.SetDrawIndirect(&params);
     PrepareDraw(params.is_indexed, [this, &params] {
+        MarkDepthStencilWrites();
         const auto indirect_buffer = buffer_cache.GetDrawIndirectBuffer();
         const auto& buffer = indirect_buffer.first;
         const auto& offset = indirect_buffer.second;
@@ -585,6 +594,8 @@ void RasterizerVulkan::Clear(u32 layer_count) {
             cmdbuf.ClearAttachments(attachment, clear_rect);
         });
     }
+    // Depth/stencil was written inside the active pass (a deferred clear marks its own pass).
+    scheduler.MarkRenderPassDepthWrite();
 }
 
 void RasterizerVulkan::DispatchCompute() {

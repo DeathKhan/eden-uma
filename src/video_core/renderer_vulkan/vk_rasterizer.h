@@ -144,6 +144,9 @@ public:
                                                             u32 pixel_stride);
 
 private:
+    /// Tells the scheduler when the current draw may write the depth/stencil attachment.
+    void MarkDepthStencilWrites();
+
     static constexpr const u64 NEEDS_D24[] = {
         0x01006A800016E000ULL, // SSBU
         0x0100E95004038000ULL, // XC2

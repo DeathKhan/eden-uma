@@ -1124,6 +1124,12 @@ void TextureCacheRuntime::EraseResolveShadow(VkImage msaa_image) {
 }
 
 void TextureCacheRuntime::BarrierFeedbackLoop() {
+    // Sampling the bound depth image needs the pass broken (its end is the barrier) only if the
+    // pass wrote depth/stencil since it began. Otherwise its begin already ordered the earlier
+    // writes, and draws that only read depth (soft particles, fog) can share one pass.
+    if (scheduler.IsRenderPassActive() && !scheduler.RenderPassWroteDepth()) {
+        return;
+    }
     scheduler.RequestOutsideRenderPassOperationContext();
 }
 

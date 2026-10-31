@@ -73,6 +73,15 @@ public:
     void RequestOutsideRenderPassOperationContext();
 
     /// Returns true when a render pass is currently active in the scheduler state.
+    /// Records that the active render pass may have written its depth/stencil attachment.
+    void MarkRenderPassDepthWrite() noexcept {
+        state.renderpass_depth_written = true;
+    }
+
+    [[nodiscard]] bool RenderPassWroteDepth() const noexcept {
+        return state.renderpass_depth_written;
+    }
+
     bool IsRenderPassActive() const {
         return state.renderpass != VK_NULL_HANDLE;
     }
@@ -259,6 +268,9 @@ private:
         /// Load-op variant equivalent of the active pass: the framebuffer's base render pass when
         /// a clear-only variant was begun, so later draws on the same framebuffer keep using it.
         VkRenderPass base_renderpass{};
+        /// The active render pass may have written its depth/stencil attachment (clear load op,
+        /// clear attachments or a draw with depth/stencil writes) since it began.
+        bool renderpass_depth_written{};
         VkFramebuffer framebuffer{};
         VkExtent2D render_area = {0, 0};
         GraphicsPipeline* graphics_pipeline = nullptr;

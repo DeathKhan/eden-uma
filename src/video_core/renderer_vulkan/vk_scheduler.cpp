@@ -108,6 +108,7 @@ void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass
     const VkExtent2D render_area = framebuffer->RenderArea();
     state.renderpass = renderpass;
     state.base_renderpass = renderpass;
+    state.renderpass_depth_written = false;
     state.framebuffer = framebuffer_handle;
     state.render_area = render_area;
 
@@ -177,6 +178,9 @@ void Scheduler::RealizeDeferredClear() {
     // reloading the attachments. Variants that discard on store are not equivalent.
     if (color_discard_mask == 0 && !depth_stencil_discard) {
         state.base_renderpass = dc.framebuffer->RenderPass();
+    }
+    if (dc.depth_stencil) {
+        MarkRenderPassDepthWrite();
     }
 }
 
