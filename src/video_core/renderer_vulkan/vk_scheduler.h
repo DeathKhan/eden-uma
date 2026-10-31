@@ -326,6 +326,9 @@ private:
     std::condition_variable_any work_cv;
     /// Signalled when the worker pops the last queued chunk (WaitWorker waits on it).
     std::condition_variable_any drain_cv;
+    /// Guarded by queue_mutex: the worker is blocked in work_cv / WaitWorker calls are blocked.
+    bool worker_sleeping = false;
+    u32 drain_waiters = 0;
     std::jthread worker_thread;
 
     std::chrono::steady_clock::duration frame_interval{};

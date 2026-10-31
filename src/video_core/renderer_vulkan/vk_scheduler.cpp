@@ -75,7 +75,9 @@ void Scheduler::WaitWorker() {
     // Ensure the queue is drained.
     {
         std::unique_lock ql{queue_mutex};
+        ++drain_waiters;
         drain_cv.wait(ql, [this] { return work_queue.empty(); });
+        --drain_waiters;
     }
 
     // Now wait for execution to finish.
@@ -84,16 +86,16 @@ void Scheduler::WaitWorker() {
 
 void Scheduler::DispatchWork() {
     if (chunk && !chunk->Empty()) {
-        // The worker only sleeps after seeing an empty queue under queue_mutex, so it only needs
-        // a wake-up when this push makes the queue non-empty. Waking it for every chunk (every
-        // few draws) turned into a futex wake storm on the GPU thread.
-        bool was_empty;
+        // The worker publishes under queue_mutex that it is about to block, after seeing an
+        // empty queue; only then does it need a wake-up. Waking it for every chunk (every few
+        // draws) turned into a futex wake storm on the GPU thread.
+        bool wake;
         {
             std::scoped_lock ql{queue_mutex};
-            was_empty = work_queue.empty();
             work_queue.push(std::move(chunk));
+            wake = worker_sleeping;
         }
-        if (was_empty) {
+        if (wake) {
             work_cv.notify_one();
         }
         AcquireNewChunk();
@@ -286,7 +288,7 @@ void Scheduler::WorkerThread(std::stop_token stop_token) {
 
         work = std::move(work_queue.front());
         work_queue.pop();
-        if (work_queue.empty()) {
+        if (work_queue.empty() && drain_waiters != 0) {
             drain_cv.notify_all();
         }
         return true;
@@ -299,7 +301,13 @@ void Scheduler::WorkerThread(std::stop_token stop_token) {
             std::unique_lock lk{queue_mutex};
 
             // Wait for work.
-            work_cv.wait(lk, stop_token, [&] { return TryPopQueue(work); });
+            // Only block (and register a stop callback, which the stop-token wait does on every
+            // call) when there is nothing queued already.
+            if (!TryPopQueue(work)) {
+                worker_sleeping = true;
+                work_cv.wait(lk, stop_token, [&] { return TryPopQueue(work); });
+                worker_sleeping = false;
+            }
 
             // If we've been asked to stop, we're done.
             if (stop_token.stop_requested()) {
