@@ -67,6 +67,14 @@ public:
     /// UMA fast path: mapped span if the buffer is host-visible and idle on the GPU, else empty.
     [[nodiscard]] std::span<u8> DirectWriteSpan() noexcept;
 
+    /// UMA fast path, range granular: mapped span if [offset, offset+size) has no recorded or
+    /// in-flight GPU access (same condition the upload-reorder path uses) and no untracked
+    /// whole-buffer GPU use is pending. Empty otherwise.
+    [[nodiscard]] std::span<u8> DirectWriteRange(u64 offset, u64 size) noexcept;
+
+    /// Records a GPU access that the range tracker does not see (indirect args, CPU-obtained).
+    void MarkUntrackedGpuUse() noexcept;
+
     void FlushDirectWrite(u64 offset, u64 size) noexcept;
 
     void ResetUsageTracking() noexcept {
@@ -97,6 +105,7 @@ private:
     VkDeviceAddress device_address{};
     u64 last_usage_tick{};
     u64 gpu_use_tick{};
+    u64 untracked_use_tick{};
     bool is_null{};
     bool sparse_compatible{};
 };
