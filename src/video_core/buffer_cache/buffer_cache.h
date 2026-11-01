@@ -993,8 +993,25 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
             return alignment > 1 && (offset % alignment) != 0;
         }
     }();
+    // UMA: an aliased buffer is guest RAM, so binding it in place reads exactly what a copy
+    // would, without the per-draw memcpy. Memory that GPU engines write in the command stream
+    // (constant buffer updates, inline uploads) keeps the snapshot copy, since those writes
+    // happen before earlier draws execute.
+    bool in_place = false;
+    u32 skip_cache_size = channel_state->uniform_buffer_skip_cache_size;
+    if constexpr (requires { runtime.IsEngineWritten(device_addr, size); }) {
+        if (IsHostAliased(buffer)) {
+            in_place = !runtime.IsEngineWritten(device_addr, size);
+            // Engine-written uniform memory keeps the snapshot whatever the hit-rate says.
+            skip_cache_size = in_place ? 0 : DEFAULT_SKIP_CACHE_SIZE;
+            if (in_place) {
+                // Not a cache decision: keep it out of the hit-rate heuristic.
+                --channel_state->uniform_cache_shots[0];
+            }
+        }
+    }
     const bool use_fast_buffer = needs_alignment_stream
-        || (has_host_buffer && size <= channel_state->uniform_buffer_skip_cache_size
+        || (has_host_buffer && size <= skip_cache_size
             && !memory_tracker.IsRegionGpuModified(device_addr, size));
     if (use_fast_buffer) {
         if constexpr (IS_OPENGL) {
@@ -1022,7 +1039,7 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
         return;
     }
     // Classic cached path
-    if (SynchronizeBuffer(buffer, device_addr, size)) {
+    if (SynchronizeBuffer(buffer, device_addr, size) && !in_place) {
         ++channel_state->uniform_cache_hits[0];
     }
     if constexpr (requires { buffer.MarkGpuUse(); }) {
@@ -2155,6 +2172,7 @@ void BufferCache<P>::PrepareGpuThreadWrite(DAddr device_addr, u64 size) {
         if (!runtime.HasHostAliases()) {
             return;
         }
+        runtime.MarkEngineWritten(device_addr, size);
         boost::container::small_vector<BufferId, 4> busy;
         ForEachBufferInRange(device_addr, size, [&](BufferId buffer_id, Buffer& buffer) {
             if (buffer.IsHostAliased() && buffer.IsGpuBusy()) {

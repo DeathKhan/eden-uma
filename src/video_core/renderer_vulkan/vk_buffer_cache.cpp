@@ -771,6 +771,28 @@ void BufferCacheRuntime::BindDeviceMemory(Tegra::MaxwellDeviceMemoryManager& dev
         return;
     }
     host_alias_forbidden.assign(((1ULL << Tegra::MaxwellDeviceMemoryManager::AS_BITS) >> 16) / 64, 0);
+    engine_written.assign(((1ULL << Tegra::MaxwellDeviceMemoryManager::AS_BITS) >> 12) / 64, 0);
+}
+
+void BufferCacheRuntime::MarkEngineWritten(DAddr addr, u64 size) {
+    if (engine_written.empty() || size == 0) {
+        return;
+    }
+    for (u64 page = addr >> 12; page <= (addr + size - 1) >> 12; ++page) {
+        engine_written[page / 64] |= 1ULL << (page % 64);
+    }
+}
+
+bool BufferCacheRuntime::IsEngineWritten(DAddr addr, u64 size) const {
+    if (engine_written.empty()) {
+        return true;
+    }
+    for (u64 page = addr >> 12; page <= (addr + size - 1) >> 12; ++page) {
+        if ((engine_written[page / 64] >> (page % 64)) & 1) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool BufferCacheRuntime::CountHostSyncedFence() noexcept {

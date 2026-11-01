@@ -252,6 +252,9 @@ public:
     bool CountHostSyncedFence() noexcept;
     /// Keeps [addr, addr + size) out of aliasing from now on.
     void ForbidHostAlias(DAddr addr, u64 size);
+    /// GPU engines wrote [addr, addr + size) from the command stream (4 KiB granularity).
+    void MarkEngineWritten(DAddr addr, u64 size);
+    [[nodiscard]] bool IsEngineWritten(DAddr addr, u64 size) const;
     /// Aliased cache buffer for [addr, addr + size), or an empty buffer.
     [[nodiscard]] vk::Buffer CreateHostAliasBuffer(DAddr addr, u64 size, bool sparse_compatible);
 
@@ -386,6 +389,7 @@ private:
     Tegra::MaxwellDeviceMemoryManager* device_memory = nullptr;
     std::unique_ptr<HostAliasPool> host_alias_pool;
     std::vector<u64> host_alias_forbidden; ///< Bit per 64 KiB device page.
+    std::vector<u64> engine_written;       ///< Bit per 4 KiB device page.
     std::atomic<bool> has_host_aliases{false};
     struct HostAliasStats {
         u64 buffers = 0;
