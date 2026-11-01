@@ -87,7 +87,7 @@ vk::Buffer CreateBuffer(const Device& device, const MemoryAllocator& memory_allo
     // UMA: put cache buffers in mapped device-local|host-visible memory so uploads can be
     // written in place (no staging + GPU copy).
     const MemoryUsage usage =
-        device.IsUmaFastPath() ? MemoryUsage::Stream : MemoryUsage::DeviceLocal;
+        device.IsUmaZeroCopy() ? MemoryUsage::Stream : MemoryUsage::DeviceLocal;
     if (sparse_alignment > 1) {
         return memory_allocator.CreateBuffer(buffer_ci, usage, sparse_alignment);
     }
@@ -136,7 +136,7 @@ void Buffer::MarkGpuUse() noexcept {
 
 std::span<u8> Buffer::DirectWriteSpan() noexcept {
     if (!device || is_null || !buffer.IsHostVisible() || !buffer.IsHostCoherent() ||
-        !device->IsUmaFastPath()) {
+        !device->IsUmaZeroCopy()) {
         return {};
     }
     if (!scheduler->IsFree(gpu_use_tick)) {
@@ -156,7 +156,7 @@ std::atomic<u64> uma_direct_bytes{0}, uma_staged_bytes{0}, uma_direct_calls{0}, 
 
 std::span<u8> Buffer::DirectWriteRange(u64 offset, u64 size) noexcept {
     const bool ok = device && !is_null && buffer.IsHostVisible() && buffer.IsHostCoherent() &&
-                    device->IsUmaFastPath() && scheduler->IsFree(untracked_use_tick) &&
+                    device->IsUmaDirectWrite() && scheduler->IsFree(untracked_use_tick) &&
                     !tracker.IsUsed(offset, size);
     (ok ? uma_direct_bytes : uma_staged_bytes).fetch_add(size, std::memory_order_relaxed);
     (ok ? uma_direct_calls : uma_staged_calls).fetch_add(1, std::memory_order_relaxed);
@@ -556,6 +556,20 @@ void BufferCacheRuntime::PreCopyBarrier() {
     scheduler.Record([](vk::CommandBuffer cmdbuf) {
         cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                0, READ_BARRIER);
+    });
+}
+
+void BufferCacheRuntime::HostReadBarrier() {
+    static constexpr VkMemoryBarrier HOST_READ_BARRIER{
+        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+        .pNext = nullptr,
+        .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
+    };
+    scheduler.RequestOutsideRenderPassOperationContext();
+    scheduler.Record([](vk::CommandBuffer cmdbuf) {
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0,
+                               HOST_READ_BARRIER);
     });
 }
 

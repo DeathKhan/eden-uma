@@ -1648,13 +1648,13 @@ void Device::CollectPhysicalMemoryInfo() {
     if (is_integrated) {
         const s64 available_memory = static_cast<s64>(device_access_memory - device_initial_usage);
         u64 memory_size = Settings::values.vram_usage_mode.GetValue() == Settings::VramUsageMode::Aggressive ? 6_GiB : 4_GiB;
-        if (IsUmaFastPath()) {
+        if (IsUmaZeroCopy()) {
             // UMA: the 4 GiB heap Turnip reports is a soft number; let the cache use up to
             // half of the reported heap budget (min 6 GiB) so texture GC stops thrashing.
             memory_size = std::max<u64>(memory_size, std::max<u64>(6_GiB, device_access_memory / 2));
         }
         device_access_memory = static_cast<u64>(std::max<s64>(std::min<s64>(available_memory - 8_GiB, memory_size), std::min<s64>(local_memory, memory_size)));
-        if (IsUmaFastPath()) {
+        if (IsUmaZeroCopy()) {
             device_access_memory = std::max<u64>(device_access_memory, std::min<u64>(memory_size, 6_GiB));
         }
     } else {

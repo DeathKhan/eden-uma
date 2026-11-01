@@ -326,8 +326,20 @@ public:
 
     /// UMA fast path + VK_EXT_host_image_copy: CPU writes fresh compressed textures directly.
     bool IsUmaHostImageCopyUsable() const {
-        return IsUmaFastPath() && extensions.host_image_copy &&
+        return IsUmaFastPath() && Settings::values.uma_host_image_copy.GetValue() &&
+               extensions.host_image_copy &&
                features.host_image_copy.hostImageCopy;
+    }
+
+    /// Per-path UMA toggles (setting AND hardware gate).
+    bool IsUmaZeroCopy() const {
+        return IsUmaFastPath() && Settings::values.uma_zero_copy.GetValue();
+    }
+    bool IsUmaDirectWrite() const {
+        return IsUmaZeroCopy() && Settings::values.uma_direct_write.GetValue();
+    }
+    bool IsUmaDirectReadback() const {
+        return IsUmaZeroCopy() && Settings::values.uma_direct_readback.GetValue();
     }
 
     VkDriverIdKHR GetDriverID() const {

@@ -239,8 +239,10 @@ vk::Image MemoryAllocator::CreateImage(const VkImageCreateInfo &ci) const
 
 vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsage usage) const {
     // MESA will do memcpy() if not marked as host cached, so just force mark it for most buffers
+    // UMA (Turnip/Android): prefer cached+coherent stream memory so in-place readbacks of
+    // cache buffers are not uncached reads.
     auto const anv_flags = (usage == MemoryUsage::Stream
-        && device.GetDriverID() == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA)
+        && (device.GetDriverID() == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA || device.IsUmaDirectReadback()))
         ? VK_MEMORY_PROPERTY_HOST_CACHED_BIT : 0;
     const VmaAllocationCreateInfo alloc_ci = {
         .flags = VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT | MemoryUsageVmaFlags(usage),
@@ -291,7 +293,7 @@ vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsa
     }
     VkMemoryPropertyFlags anv_flags = 0;
     if (usage == MemoryUsage::Stream &&
-        device.GetDriverID() == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA) {
+        (device.GetDriverID() == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA || device.IsUmaDirectReadback())) {
         anv_flags = VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
     }
     u32 memory_type_bits = valid_memory_types;

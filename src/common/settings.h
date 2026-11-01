@@ -705,6 +705,13 @@ struct Values {
 #endif
                                                        "vertex_input_dynamic_state", Category::RendererExtensions};
 
+    // UMA fast-path toggles (only take effect on Android + integrated Turnip; default ON).
+    Setting<bool> uma_zero_copy{linkage, true, "uma_zero_copy", Category::RendererAdvanced};
+    Setting<bool> uma_direct_write{linkage, true, "uma_direct_write", Category::RendererAdvanced};
+    Setting<bool> uma_host_image_copy{linkage, true, "uma_host_image_copy",
+                                      Category::RendererAdvanced};
+    Setting<bool> uma_direct_readback{linkage, true, "uma_direct_readback",
+                                      Category::RendererAdvanced};
     Setting<bool> renderer_debug{linkage, false, "debug", Category::RendererDebug};
     Setting<bool> renderer_shader_feedback{linkage, false, "shader_feedback",
                                            Category::RendererDebug};
