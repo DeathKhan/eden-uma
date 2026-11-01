@@ -69,6 +69,7 @@ VK_DEFINE_HANDLE(VmaAllocator)
             primitive_topology_list_restart)                                                       \
     FEATURE(EXT, ProvokingVertex, PROVOKING_VERTEX, provoking_vertex)                              \
     FEATURE(EXT, Robustness2, ROBUSTNESS_2, robustness2)                                           \
+    FEATURE(EXT, HostImageCopy, HOST_IMAGE_COPY, host_image_copy)                                  \
     FEATURE(EXT, TransformFeedback, TRANSFORM_FEEDBACK, transform_feedback)                        \
     FEATURE(EXT, VertexInputDynamicState, VERTEX_INPUT_DYNAMIC_STATE, vertex_input_dynamic_state)  \
     FEATURE(KHR, Maintenance5, MAINTENANCE_5, maintenance5)                                        \
@@ -321,6 +322,12 @@ public:
 #else
         return false;
 #endif
+    }
+
+    /// UMA fast path + VK_EXT_host_image_copy: CPU writes fresh compressed textures directly.
+    bool IsUmaHostImageCopyUsable() const {
+        return IsUmaFastPath() && extensions.host_image_copy &&
+               features.host_image_copy.hostImageCopy;
     }
 
     VkDriverIdKHR GetDriverID() const {
