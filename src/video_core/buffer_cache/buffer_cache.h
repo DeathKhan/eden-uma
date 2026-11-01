@@ -777,6 +777,15 @@ void BufferCache<P>::BindHostIndexBuffer() {
     if (draw_state.inline_index_draw_indexes.empty()) {
         SynchronizeBuffer(buffer, channel_state->index_buffer.device_addr, size);
     } else {
+        if constexpr (USE_MEMORY_MAPS_FOR_UPLOADS && !HAS_FULL_INDEX_AND_PRIMITIVE_SUPPORT) {
+            auto stream = runtime.UploadStagingBuffer(size);
+            std::memcpy(stream.mapped_span.data(), draw_state.inline_index_draw_indexes.data(),
+                        size);
+            runtime.BindIndexBuffer(draw_state.topology, draw_state.index_buffer.format,
+                                    draw_state.index_buffer.first, draw_state.index_buffer.count,
+                                    stream.buffer, static_cast<u32>(stream.offset), size);
+            return;
+        }
         std::span<u8> direct;
         if constexpr (requires { buffer.DirectWriteRange(0, 0); }) {
             direct = buffer.DirectWriteRange(0, size);
@@ -1717,6 +1726,16 @@ void BufferCache<P>::JoinOverlap(BufferId new_buffer_id, BufferId overlap_id,
         DeleteBuffer(overlap_id, true);
         return;
     }
+    if constexpr (requires { new_buffer.DirectWriteSpan(); }) {
+        // Both mapped and nothing pending on either: the GPU copy would just be a memcpy.
+        const std::span<u8> src = overlap.DirectWriteSpan();
+        const std::span<u8> dst = src.empty() ? std::span<u8>{} : new_buffer.DirectWriteSpan();
+        if (!dst.empty()) {
+            std::memcpy(dst.data() + dst_base_offset, src.data(), overlap.SizeBytes());
+            DeleteBuffer(overlap_id, true);
+            return;
+        }
+    }
     copies.push_back(BufferCopy{
         .src_offset = 0,
         .dst_offset = dst_base_offset,
@@ -1745,8 +1764,16 @@ BufferId BufferCache<P>::CreateBuffer(DAddr device_addr, u32 wanted_size,
     const size_t size_bytes = new_buffer.SizeBytes();
     const bool aliased = IsHostAliased(new_buffer);
     if (!aliased) {
-        runtime.ClearBuffer(new_buffer, 0, size_bytes, 0);
-        new_buffer.MarkUsage(0, size_bytes);
+        std::span<u8> mapped;
+        if constexpr (requires { new_buffer.DirectWriteSpan(); }) {
+            mapped = new_buffer.DirectWriteSpan();
+        }
+        if (!mapped.empty()) {
+            std::memset(mapped.data(), 0, size_bytes);
+        } else {
+            runtime.ClearBuffer(new_buffer, 0, size_bytes, 0);
+            new_buffer.MarkUsage(0, size_bytes);
+        }
     }
     for (const BufferId overlap_id : overlap.ids) {
         JoinOverlap(new_buffer_id, overlap_id, !overlap.has_stream_leap);
@@ -1847,7 +1874,9 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
         }
         const std::span<BufferCopy> copies_span(upload_copies.data(), upload_copies.size());
         UploadMemory(buffer, total_size_bytes, largest_copy, copies_span);
-        any_buffer_uploaded = true;
+        if constexpr (!USE_MEMORY_MAPS_FOR_UPLOADS) {
+            any_buffer_uploaded = true;
+        }
         return false;
     } else {
         boost::container::small_vector<BufferCopy, 4> copies;
@@ -1940,6 +1969,7 @@ void BufferCache<P>::MappedUploadMemory([[maybe_unused]] Buffer& buffer,
         }
         const bool can_reorder = runtime.CanReorderUpload(buffer, copies);
         runtime.CopyBuffer(buffer, upload_staging.buffer, copies, true, can_reorder);
+        any_buffer_uploaded = true;
         if constexpr (requires { buffer.DirectWriteRange(0, 0); }) {
             // A pending GPU copy now targets these ranges: keep later direct writes off them.
             for (const BufferCopy& copy : copies) {
@@ -2030,10 +2060,12 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
                 gpu_modified_ranges.Subtract(device_addr_out, range_size);
             });
         if (pending) {
-            if constexpr (requires { runtime.HostReadBarrier(); }) {
+            if constexpr (requires { runtime.HostReadBarrier(); buffer.GpuUseTick(); }) {
                 runtime.HostReadBarrier();
+                runtime.Wait(buffer.GpuUseTick());
+            } else {
+                runtime.Finish();
             }
-            runtime.Finish();
         }
         return;
     }

@@ -626,14 +626,19 @@ void TextureCache<P>::DownloadMemory(DAddr cpu_addr, size_t size) {
     std::ranges::sort(images, [this](ImageId lhs, ImageId rhs) {
         return slot_images[lhs].modification_tick < slot_images[rhs].modification_tick;
     });
+    boost::container::small_vector<std::pair<ImageId, decltype(runtime.DownloadStagingBuffer(0))>,
+                                   16> maps;
     for (const ImageId image_id : images) {
         Image& image = slot_images[image_id];
         auto map = runtime.DownloadStagingBuffer(image.unswizzled_size_bytes);
-        const auto copies = FullDownloadCopies(image.info);
-        image.DownloadMemory(map, copies);
-        runtime.Finish();
-        SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies, map.mapped_span,
-                     swizzle_data_buffer);
+        image.DownloadMemory(map, FullDownloadCopies(image.info));
+        maps.emplace_back(image_id, map);
+    }
+    runtime.Finish();
+    for (auto& [image_id, map] : maps) {
+        Image& image = slot_images[image_id];
+        SwizzleImage(*gpu_memory, image.gpu_addr, image.info, FullDownloadCopies(image.info),
+                     map.mapped_span, swizzle_data_buffer);
     }
 }
 

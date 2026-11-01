@@ -140,6 +140,11 @@ public:
     /// GPU work recorded for this buffer may not have finished yet.
     [[nodiscard]] bool IsGpuBusy() const noexcept;
 
+    /// Tick of the last recorded GPU use of this buffer.
+    [[nodiscard]] u64 GpuUseTick() const noexcept {
+        return gpu_use_tick;
+    }
+
     /// The device mapping behind an aliased buffer changed; it must be recreated before use.
     void MarkHostAliasStale() noexcept {
         host_alias_stale = true;
