@@ -18,6 +18,7 @@
 #include "common/alignment.h"
 #include "common/common_funcs.h"
 #include "common/common_types.h"
+#include "video_core/rasterizer_interface.h"
 #include "common/div_ceil.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 
@@ -305,6 +306,8 @@ struct WordManager {
         VAddr addr = cpu_addr + word_index * BYTES_PER_WORD;
         IteratePages(changed_bits, [&](size_t offset, size_t size) {
             tracker->UpdatePagesCachedCount(addr + offset * BYTES_PER_PAGE, size * BYTES_PER_PAGE, add_to_tracker ? 1 : -1);
+            VideoCore::CountPage(VideoCore::PageCounter::BufferProtect);
+            VideoCore::CountPage(VideoCore::PageCounter::BufferProtectKiB, (size * BYTES_PER_PAGE) >> 10);
         });
     }
 

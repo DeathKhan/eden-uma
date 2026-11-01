@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <array>
+#include <atomic>
 #include <functional>
 #include <optional>
 #include <span>
@@ -40,6 +42,23 @@ using DiskResourceLoadCallback = std::function<void(LoadCallbackStage, std::size
 
 /// True on the thread that processes GPU command lists (set by GPUThread::ThreadManager).
 inline thread_local bool is_gpu_command_thread = false;
+
+/// Cheap counters behind the "PERF uma pages" log line (relaxed atomics, reset every 600 frames).
+enum class PageCounter : size_t {
+    BufferProtect,     ///< buffer-cache cached-count changes (calls)
+    BufferProtectKiB,
+    TextureTrack,      ///< texture cache TrackImage (calls)
+    TextureTrackKiB,
+    TextureUntrack,
+    TextureUpload,     ///< RefreshContents uploads
+    TextureUploadKiB,
+    TextureUploadLinear,
+    Count,
+};
+inline std::array<std::atomic<u64>, static_cast<size_t>(PageCounter::Count)> page_counters{};
+inline void CountPage(PageCounter counter, u64 value = 1) {
+    page_counters[static_cast<size_t>(counter)].fetch_add(value, std::memory_order_relaxed);
+}
 
 class RasterizerInterface {
 public:

@@ -688,6 +688,17 @@ void BufferCacheRuntime::TickFrame(Common::SlotVector<Buffer>& slot_buffers) noe
                          s.noncontiguous, s.forbidden, s.rejected, s.dealiased, s.fences);
                 s = {};
             }
+            auto take = [](VideoCore::PageCounter c) {
+                return VideoCore::page_counters[static_cast<size_t>(c)].exchange(0);
+            };
+            using VideoCore::PageCounter;
+            LOG_INFO(Render_Vulkan,
+                     "PERF uma pages buffer protect {} ({} KiB), texture track {} ({} KiB) "
+                     "untrack {}, texture uploads {} ({} KiB, {} linear)",
+                     take(PageCounter::BufferProtect), take(PageCounter::BufferProtectKiB),
+                     take(PageCounter::TextureTrack), take(PageCounter::TextureTrackKiB),
+                     take(PageCounter::TextureUntrack), take(PageCounter::TextureUpload),
+                     take(PageCounter::TextureUploadKiB), take(PageCounter::TextureUploadLinear));
         }
     }
     for (auto it = slot_buffers.begin(); it != slot_buffers.end(); it++) {

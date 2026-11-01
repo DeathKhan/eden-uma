@@ -1142,6 +1142,11 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
     image.flags &= ~ImageFlagBits::CpuModified;
 
     TrackImage(image, image_id);
+    VideoCore::CountPage(VideoCore::PageCounter::TextureUpload);
+    VideoCore::CountPage(VideoCore::PageCounter::TextureUploadKiB, image.guest_size_bytes >> 10);
+    if (image.info.type == ImageType::Linear) {
+        VideoCore::CountPage(VideoCore::PageCounter::TextureUploadLinear);
+    }
 
     if (image.info.num_samples > 1 && !runtime.CanUploadMSAA()) {
         LOG_WARNING(HW_GPU, "MSAA image uploads are not implemented");
@@ -2288,6 +2293,8 @@ template <class P>
 void TextureCache<P>::TrackImage(ImageBase& image, ImageId image_id) {
     ASSERT(False(image.flags & ImageFlagBits::Tracked));
     image.flags |= ImageFlagBits::Tracked;
+    VideoCore::CountPage(VideoCore::PageCounter::TextureTrack);
+    VideoCore::CountPage(VideoCore::PageCounter::TextureTrackKiB, image.guest_size_bytes >> 10);
     if (False(image.flags & ImageFlagBits::Sparse)) {
         if (image.cpu_addr < ~(1ULL << 40)) {
             device_memory.UpdatePagesCachedCount(image.cpu_addr, image.guest_size_bytes, 1);
@@ -2316,6 +2323,7 @@ template <class P>
 void TextureCache<P>::UntrackImage(ImageBase& image, ImageId image_id) {
     ASSERT(True(image.flags & ImageFlagBits::Tracked));
     image.flags &= ~ImageFlagBits::Tracked;
+    VideoCore::CountPage(VideoCore::PageCounter::TextureUntrack);
     if (False(image.flags & ImageFlagBits::Sparse)) {
         if (image.cpu_addr < ~(1ULL << 40)) {
             device_memory.UpdatePagesCachedCount(image.cpu_addr, image.guest_size_bytes, -1);
