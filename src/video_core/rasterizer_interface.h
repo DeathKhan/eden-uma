@@ -38,6 +38,9 @@ enum class LoadCallbackStage {
 };
 using DiskResourceLoadCallback = std::function<void(LoadCallbackStage, std::size_t, std::size_t)>;
 
+/// True on the thread that processes GPU command lists (set by GPUThread::ThreadManager).
+inline thread_local bool is_gpu_command_thread = false;
+
 class RasterizerInterface {
 public:
     virtual ~RasterizerInterface() = default;
@@ -127,6 +130,15 @@ public:
 
     /// Unmap memory range
     virtual void UnmapMemory(DAddr addr, u64 size) = 0;
+
+    /// The device mapping of [addr, addr + size) is being removed; caches that alias the guest
+    /// memory behind it must stop using it.
+    virtual void OnDeviceMemoryUnmap([[maybe_unused]] DAddr addr, [[maybe_unused]] u64 size) {}
+
+    /// A GPU engine is about to write guest memory from the CPU (inline uploads, constant
+    /// buffer updates, DMA). Caches whose GPU-side copy is that memory make in-flight GPU work
+    /// finish reading it first.
+    virtual void OnGpuThreadWrite([[maybe_unused]] DAddr addr, [[maybe_unused]] u64 size) {}
 
     /// Remap GPU memory range. This means underneath backing memory changed
     virtual void ModifyGPUMemory(size_t as_id, GPUVAddr addr, u64 size) = 0;

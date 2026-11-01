@@ -23,6 +23,9 @@ using Core::DEVICE_PAGESIZE;
 template <class P>
 BufferCache<P>::BufferCache(Tegra::MaxwellDeviceMemoryManager& device_memory_, Runtime& runtime_)
     : runtime{runtime_}, device_memory{device_memory_}, memory_tracker{device_memory} {
+    if constexpr (requires { runtime.BindDeviceMemory(device_memory); }) {
+        runtime.BindDeviceMemory(device_memory);
+    }
     // Ensure the first slot is used for the null buffer
     void(slot_buffers.insert(runtime, NullBufferParams{}));
     gpu_modified_ranges.Clear();
@@ -255,6 +258,7 @@ bool BufferCache<P>::DMACopy(GPUVAddr src_address, GPUVAddr dest_address, u64 am
         }
     }
 
+    PrepareGpuThreadWrite(*cpu_dest_address, amount);
     Tegra::Memory::DeviceGuestMemoryScoped<u8, Tegra::Memory::GuestMemoryFlags::UnsafeReadWrite>
         tmp(device_memory, *cpu_src_address, amount, &tmp_buffer);
     tmp.SetAddressAndSize(*cpu_dest_address, amount);
@@ -582,7 +586,8 @@ void BufferCache<P>::AccumulateFlushes() {
 
 template <class P>
 bool BufferCache<P>::ShouldWaitAsyncFlushes() const noexcept {
-    return (!async_buffers.empty() && async_buffers.front().has_value());
+    return (!async_buffers.empty() && async_buffers.front().has_value()) ||
+           (!pending_alias_clears.empty() && !pending_alias_clears.front().empty());
 }
 
 template <class P>
@@ -591,6 +596,7 @@ void BufferCache<P>::CommitAsyncFlushesHigh() {
 
     if (committed_gpu_modified_ranges.empty()) {
         async_buffers.emplace_back(std::optional<Async_Buffer>{});
+        pending_alias_clears.emplace_back();
         return;
     }
 
@@ -608,6 +614,7 @@ void BufferCache<P>::CommitAsyncFlushesHigh() {
     }
 
     boost::container::small_vector<std::pair<BufferCopy, BufferId>, 16> downloads;
+    boost::container::small_vector<std::pair<DAddr, u64>, 4> alias_clears;
     u64 total_size_bytes = 0;
     u64 largest_copy = 0;
     for (const Common::RangeSet<DAddr>& range_set : committed_gpu_modified_ranges) {
@@ -619,6 +626,14 @@ void BufferCache<P>::CommitAsyncFlushesHigh() {
                 const DAddr buffer_end = buffer_start + buffer.SizeBytes();
                 const DAddr new_start = (std::max)(buffer_start, device_addr);
                 const DAddr new_end = (std::min)(buffer_end, device_addr + size);
+                if (IsHostAliased(buffer)) {
+                    // The GPU writes guest RAM directly: nothing to download.
+                    gpu_modified_ranges.ForEachInRange(
+                        new_start, new_end - new_start, [&](DAddr start, DAddr end) {
+                            alias_clears.emplace_back(start, end - start);
+                        });
+                    return;
+                }
                 memory_tracker.ForEachDownloadRange(
                     new_start, new_end - new_start, false,
                     [&](u64 device_addr_out, u64 range_size) {
@@ -648,6 +663,7 @@ void BufferCache<P>::CommitAsyncFlushesHigh() {
         });
     }
     committed_gpu_modified_ranges.clear();
+    pending_alias_clears.emplace_back(std::move(alias_clears));
     if (downloads.empty()) {
         async_buffers.emplace_back(std::optional<Async_Buffer>{});
         return;
@@ -686,6 +702,12 @@ template <class P>
 void BufferCache<P>::PopAsyncBuffers() {
     if (async_buffers.empty()) {
         return;
+    }
+    if (!pending_alias_clears.empty()) {
+        for (const auto& [start, size] : pending_alias_clears.front()) {
+            gpu_modified_ranges.Subtract(start, size);
+        }
+        pending_alias_clears.pop_front();
     }
     if (!async_buffers.front().has_value()) {
         async_buffers.pop_front();
@@ -1548,7 +1570,13 @@ BufferId BufferCache<P>::FindBuffer(DAddr device_addr, u32 size, bool sparse_com
         return NULL_BUFFER_ID;
     }
     const u64 page = device_addr >> CACHING_PAGEBITS;
-    const BufferId buffer_id = page_table[page];
+    BufferId buffer_id = page_table[page];
+    if constexpr (requires { slot_buffers[buffer_id].IsHostAliasStale(); }) {
+        if (buffer_id && slot_buffers[buffer_id].IsHostAliasStale()) {
+            DeleteBuffer(buffer_id);
+            buffer_id = BufferId{};
+        }
+    }
     if (buffer_id) {
         Buffer& buffer = slot_buffers[buffer_id];
         if (buffer.IsInBounds(device_addr, size)) {
@@ -1668,6 +1696,27 @@ void BufferCache<P>::JoinOverlap(BufferId new_buffer_id, BufferId overlap_id,
     }
     boost::container::small_vector<BufferCopy, 10> copies;
     const size_t dst_base_offset = overlap.CpuAddr() - new_buffer.CpuAddr();
+    if (IsHostAliased(new_buffer)) {
+        // The new buffer is guest RAM. An aliased overlap is the same memory; an ordinary one
+        // only has to hand over what the GPU wrote and was not downloaded yet (its other
+        // contents may be older than guest RAM).
+        if (!IsHostAliased(overlap)) {
+            gpu_modified_ranges.ForEachInRange(
+                overlap.CpuAddr(), overlap.SizeBytes(), [&](DAddr start, DAddr end) {
+                    copies.push_back(BufferCopy{
+                        .src_offset = start - overlap.CpuAddr(),
+                        .dst_offset = start - new_buffer.CpuAddr(),
+                        .size = end - start,
+                    });
+                    new_buffer.MarkUsage(start - new_buffer.CpuAddr(), end - start);
+                });
+            if (!copies.empty()) {
+                runtime.CopyBuffer(new_buffer, overlap, copies, true);
+            }
+        }
+        DeleteBuffer(overlap_id, true);
+        return;
+    }
     copies.push_back(BufferCopy{
         .src_offset = 0,
         .dst_offset = dst_base_offset,
@@ -1694,13 +1743,22 @@ BufferId BufferCache<P>::CreateBuffer(DAddr device_addr, u32 wanted_size,
         slot_buffers.insert(runtime, overlap.begin, size, sparse_compatible);
     auto& new_buffer = slot_buffers[new_buffer_id];
     const size_t size_bytes = new_buffer.SizeBytes();
-    runtime.ClearBuffer(new_buffer, 0, size_bytes, 0);
-    new_buffer.MarkUsage(0, size_bytes);
+    const bool aliased = IsHostAliased(new_buffer);
+    if (!aliased) {
+        runtime.ClearBuffer(new_buffer, 0, size_bytes, 0);
+        new_buffer.MarkUsage(0, size_bytes);
+    }
     for (const BufferId overlap_id : overlap.ids) {
         JoinOverlap(new_buffer_id, overlap_id, !overlap.has_stream_leap);
     }
     Register(new_buffer_id);
-    TouchBuffer(new_buffer, new_buffer_id);
+    if (aliased) {
+        // Guest RAM is the buffer: stop write-protecting it for this cache.
+        memory_tracker.MarkRegionAsCpuModified(new_buffer.CpuAddr(), size_bytes);
+        lru_cache.Touch(new_buffer.getLRUID(), frame_tick);
+    } else {
+        TouchBuffer(new_buffer, new_buffer_id);
+    }
     return new_buffer_id;
 }
 
@@ -1751,6 +1809,9 @@ void BufferCache<P>::TouchBuffer(Buffer& buffer, BufferId buffer_id) noexcept {
 
 template <class P>
 bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 size) {
+    if (IsHostAliased(buffer)) {
+        return true;
+    }
 #ifdef __ANDROID__
     const bool use_optimized_vertex_buffers = Settings::values.use_optimized_vertex_buffers.GetValue();
 #else
@@ -1914,6 +1975,10 @@ void BufferCache<P>::InlineMemoryImplementation(DAddr dest_address, size_t copy_
 
     BufferId buffer_id = FindBuffer(dest_address, static_cast<u32>(copy_size), false);
     auto& buffer = slot_buffers[buffer_id];
+    if (IsHostAliased(buffer)) {
+        // Guest RAM already holds the data (the engine wrote it, see PrepareGpuThreadWrite).
+        return;
+    }
     SynchronizeBuffer(buffer, dest_address, static_cast<u32>(copy_size));
 
     if constexpr (requires { buffer.DirectWriteRange(0, 0); }) {
@@ -1954,6 +2019,24 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer) {
 
 template <class P>
 void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64 size) {
+    if (IsHostAliased(buffer)) {
+        // The GPU wrote guest RAM itself: only wait for those writes to land.
+        bool pending = false;
+        memory_tracker.ForEachDownloadRangeAndClear(
+            device_addr, size, [&](u64 device_addr_out, u64 range_size) {
+                gpu_modified_ranges.ForEachInRange(device_addr_out, range_size,
+                                                   [&](DAddr, DAddr) { pending = true; });
+                ClearDownload(device_addr_out, range_size);
+                gpu_modified_ranges.Subtract(device_addr_out, range_size);
+            });
+        if (pending) {
+            if constexpr (requires { runtime.HostReadBarrier(); }) {
+                runtime.HostReadBarrier();
+            }
+            runtime.Finish();
+        }
+        return;
+    }
     boost::container::small_vector<BufferCopy, 1> copies;
     u64 total_size_bytes = 0;
     u64 largest_copy = 0;
@@ -2022,6 +2105,50 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
             const DAddr copy_device_addr = buffer.CpuAddr() + copy.src_offset;
             device_memory.WriteBlockUnsafe(copy_device_addr, immediate_buffer.data(), copy.size);
         }
+    }
+}
+
+template <class P>
+void BufferCache<P>::PrepareGpuThreadWrite(DAddr device_addr, u64 size) {
+    if constexpr (requires { runtime.ForbidHostAlias(device_addr, size); }) {
+        if (!runtime.HasHostAliases()) {
+            return;
+        }
+        boost::container::small_vector<BufferId, 4> busy;
+        ForEachBufferInRange(device_addr, size, [&](BufferId buffer_id, Buffer& buffer) {
+            if (buffer.IsHostAliased() && buffer.IsGpuBusy()) {
+                busy.push_back(buffer_id);
+            }
+        });
+        if (busy.empty()) {
+            return;
+        }
+        // Work recorded before this write must not see it: let it finish, then keep the range
+        // out of aliasing so later writes go through ordinary ordered uploads.
+        runtime.Finish();
+        for (const BufferId buffer_id : busy) {
+            const Buffer& buffer = slot_buffers[buffer_id];
+            const DAddr addr = buffer.CpuAddr();
+            const u64 bytes = buffer.SizeBytes();
+            // Its GPU writes are in guest RAM now, so the ordinary buffer that replaces it must
+            // upload them rather than treat them as pending downloads.
+            memory_tracker.ForEachDownloadRangeAndClear(addr, bytes, [](u64, u64) {});
+            ClearDownload(addr, bytes);
+            gpu_modified_ranges.Subtract(addr, bytes);
+            runtime.ForbidHostAlias(addr, bytes);
+            DeleteBuffer(buffer_id);
+        }
+    }
+}
+
+template <class P>
+void BufferCache<P>::OnDeviceMemoryUnmap(DAddr device_addr, u64 size) {
+    if constexpr (requires { slot_buffers[BufferId{}].MarkHostAliasStale(); }) {
+        ForEachBufferInRange(device_addr, size, [&](BufferId, Buffer& buffer) {
+            if (buffer.IsHostAliased()) {
+                buffer.MarkHostAliasStale();
+            }
+        });
     }
 }
 

@@ -72,8 +72,11 @@ public:
     }
 
     void SignalFence(std::function<void()>&& func) {
-        const bool delay_fence = Settings::IsGPUFenceBehaviorDefault() ? Settings::IsGPULevelHigh() : Settings::IsGPUFenceBehaviorBalanced() || Settings::IsGPUFenceBehaviorAccurate();
-        const bool should_flush = ShouldFlush();
+        // With UMA host aliasing the cache buffers are guest RAM, so the guest may only learn
+        // that the GPU is done once the host GPU is: no stubbed or early-released fences.
+        const bool host_sync = buffer_cache.NeedsHostSyncedFences();
+        const bool delay_fence = host_sync || (Settings::IsGPUFenceBehaviorDefault() ? Settings::IsGPULevelHigh() : Settings::IsGPUFenceBehaviorBalanced() || Settings::IsGPUFenceBehaviorAccurate());
+        const bool should_flush = host_sync || ShouldFlush();
         if constexpr (!can_async_check) {
             TryReleasePendingFences<false>();
         }

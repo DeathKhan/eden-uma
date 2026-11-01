@@ -171,6 +171,7 @@ struct DeviceMemoryManagerAllocator {
 template <typename Traits>
 DeviceMemoryManager<Traits>::DeviceMemoryManager(const DeviceMemory& device_memory_)
     : physical_base{uintptr_t(device_memory_.buffer.BackingBasePointer())}
+    , physical_size{device_memory_.buffer.BackingSize()}
     , device_inter{nullptr}
     , compressed_device_addr(1ULL << ((Settings::values.memory_layout_mode.GetValue() == Settings::MemoryLayout::Memory_4Gb ? physical_min_bits : physical_max_bits) - Memory::YUZU_PAGEBITS))
     , tracked_entries(device_as_size >> Memory::YUZU_PAGEBITS)
@@ -244,6 +245,7 @@ template <typename Traits>
 void DeviceMemoryManager<Traits>::Unmap(DAddr address, size_t size) {
     size_t start_page_d = address >> Memory::YUZU_PAGEBITS;
     size_t num_pages = Common::AlignUp(size, Memory::YUZU_PAGESIZE) >> Memory::YUZU_PAGEBITS;
+    device_inter->OnDeviceMemoryUnmap(address, size);
     device_inter->InvalidateRegion(address, size);
     std::scoped_lock lk(mapping_guard);
 

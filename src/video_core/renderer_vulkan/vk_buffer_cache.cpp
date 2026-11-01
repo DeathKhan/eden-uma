@@ -11,6 +11,9 @@
 #include <span>
 #include <vector>
 
+#include "common/alignment.h"
+#include "common/literals.h"
+#include "common/logging.h"
 #include "video_core/buffer_cache/buffer_cache_base.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 
@@ -24,6 +27,7 @@
 #include "video_core/texture_cache/util.h"
 
 namespace Vulkan {
+using namespace Common::Literals;
 namespace {
 VkBufferCopy MakeBufferCopy(const VideoCommon::BufferCopy& copy) {
     return VkBufferCopy{
@@ -55,6 +59,25 @@ size_t BytesPerIndex(VkIndexType index_type) {
         ASSERT_MSG(false, "Invalid index type={}", index_type);
         return 1;
     }
+}
+
+VkBufferUsageFlags CacheBufferUsage(const Device& device) {
+    VkBufferUsageFlags flags =
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+        VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT |
+        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+        VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+        VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+    if (device.IsExtTransformFeedbackSupported()) {
+        flags |= VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT;
+    }
+    if (device.IsExtConditionalRendering()) {
+        flags |= VK_BUFFER_USAGE_CONDITIONAL_RENDERING_BIT_EXT;
+    }
+    if (device.IsBufferDeviceAddressSupported()) {
+        flags |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    }
+    return flags;
 }
 
 vk::Buffer CreateBuffer(const Device& device, const MemoryAllocator& memory_allocator, u64 size,
@@ -112,9 +135,13 @@ Buffer::Buffer(BufferCacheRuntime& runtime, DAddr cpu_addr_, u64 size_bytes_,
                bool sparse_compatible_)
     : VideoCommon::BufferBase(cpu_addr_, size_bytes_), device{&runtime.device},
       scheduler{&runtime.scheduler},
-      buffer{CreateBuffer(*device, runtime.memory_allocator, SizeBytes(),
-                          runtime.SparseAlignmentFor(sparse_compatible_))},
+      buffer{runtime.CreateHostAliasBuffer(cpu_addr_, SizeBytes(), sparse_compatible_)},
       tracker{SizeBytes()} {
+    host_aliased = static_cast<bool>(buffer);
+    if (!host_aliased) {
+        buffer = CreateBuffer(*device, runtime.memory_allocator, SizeBytes(),
+                              runtime.SparseAlignmentFor(sparse_compatible_));
+    }
     sparse_compatible = sparse_compatible_;
     if (runtime.device.HasDebuggingToolAttached()) {
         buffer.SetObjectNameEXT(fmt::format("Buffer {:#x}", CpuAddr()).c_str());
@@ -128,6 +155,10 @@ void Buffer::MarkUsage(u64 offset, u64 size) noexcept {
     tracker.Track(offset, size);
     last_usage_tick = scheduler->CurrentTick();
     gpu_use_tick = last_usage_tick;
+}
+
+bool Buffer::IsGpuBusy() const noexcept {
+    return !scheduler->IsFree(gpu_use_tick);
 }
 
 void Buffer::MarkGpuUse() noexcept {
@@ -168,6 +199,143 @@ std::span<u8> Buffer::DirectWriteRange(u64 offset, u64 size) noexcept {
 
 void Buffer::FlushDirectWrite(u64, u64) noexcept {
     // DirectWriteSpan only hands out host-coherent memory; nothing to flush.
+}
+
+HostAliasPool::HostAliasPool(const Device& device_, std::span<u8> backing_)
+    : device{device_}, backing{backing_} {
+    const auto& dld = device.GetDispatchLoader();
+    const VkDevice logical = *device.GetLogical();
+    const auto get_properties = reinterpret_cast<PFN_vkGetMemoryHostPointerPropertiesEXT>(
+        dld.vkGetDeviceProcAddr(logical, "vkGetMemoryHostPointerPropertiesEXT"));
+    if (!get_properties || backing.empty()) {
+        return;
+    }
+    VkMemoryHostPointerPropertiesEXT properties{
+        .sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT,
+        .pNext = nullptr,
+        .memoryTypeBits = 0,
+    };
+    if (get_properties(logical, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+                       backing.data(), &properties) != VK_SUCCESS) {
+        return;
+    }
+    // Guest RAM is written by the CPU without flushes, so only coherent types will do.
+    const auto memory = device.GetPhysical().GetMemoryProperties().memoryProperties;
+    for (u32 type = 0; type < memory.memoryTypeCount; ++type) {
+        if ((properties.memoryTypeBits & (1U << type)) != 0 &&
+            (memory.memoryTypes[type].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0) {
+            memory_type = type;
+            break;
+        }
+    }
+    LOG_INFO(Render_Vulkan, "UMA host alias: guest RAM {} MiB, import memory type {}",
+             backing.size() >> 20, memory_type == INVALID_TYPE ? -1 : s64{memory_type});
+}
+
+HostAliasPool::~HostAliasPool() {
+    const auto& dld = device.GetDispatchLoader();
+    for (const Import& import : imports) {
+        dld.vkFreeMemory(*device.GetLogical(), import.memory, nullptr);
+    }
+}
+
+const HostAliasPool::Import* HostAliasPool::FindOrImport(u8* ptr, u64 size) {
+    for (const Import& import : imports) {
+        if (ptr >= import.begin && ptr + size <= import.end) {
+            return &import;
+        }
+    }
+    if (import_failed) {
+        return nullptr;
+    }
+    static constexpr u64 GRANULE = 64_MiB;
+    const u64 offset = static_cast<u64>(ptr - backing.data());
+    const u64 begin = Common::AlignDown(offset, GRANULE);
+    const u64 end = (std::min<u64>)(Common::AlignUp(offset + size, GRANULE), backing.size());
+    const VkMemoryAllocateFlagsInfo flags_info{
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
+        .pNext = nullptr,
+        .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT,
+        .deviceMask = 0,
+    };
+    const VkImportMemoryHostPointerInfoEXT import_info{
+        .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
+        .pNext = device.IsBufferDeviceAddressSupported() ? &flags_info : nullptr,
+        .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+        .pHostPointer = backing.data() + begin,
+    };
+    const VkMemoryAllocateInfo allocate_info{
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .pNext = &import_info,
+        .allocationSize = end - begin,
+        .memoryTypeIndex = memory_type,
+    };
+    VkDeviceMemory memory{};
+    const auto& dld = device.GetDispatchLoader();
+    const VkResult result =
+        dld.vkAllocateMemory(*device.GetLogical(), &allocate_info, nullptr, &memory);
+    if (result != VK_SUCCESS) {
+        LOG_WARNING(Render_Vulkan, "UMA host alias: importing {} MiB of guest RAM failed ({}); "
+                    "no further aliasing", (end - begin) >> 20, static_cast<int>(result));
+        import_failed = true;
+        return nullptr;
+    }
+    imported_bytes += end - begin;
+    imports.push_back(Import{
+        .begin = backing.data() + begin,
+        .end = backing.data() + end,
+        .memory = memory,
+    });
+    return &imports.back();
+}
+
+vk::Buffer HostAliasPool::CreateBuffer(u8* ptr, VkBufferCreateInfo ci) {
+    if (!IsUsable() || ptr < backing.data() || ptr + ci.size > backing.data() + backing.size()) {
+        return {};
+    }
+    const Import* const import = FindOrImport(ptr, ci.size);
+    if (!import) {
+        return {};
+    }
+    const VkExternalMemoryBufferCreateInfo external_info{
+        .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
+        .pNext = nullptr,
+        .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+    };
+    ci.pNext = &external_info;
+    const auto& dld = device.GetDispatchLoader();
+    const VkDevice logical = *device.GetLogical();
+    VkBuffer handle{};
+    if (dld.vkCreateBuffer(logical, &ci, nullptr, &handle) != VK_SUCCESS) {
+        return {};
+    }
+    const VkBufferMemoryRequirementsInfo2 requirements_info{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_REQUIREMENTS_INFO_2,
+        .pNext = nullptr,
+        .buffer = handle,
+    };
+    VkMemoryRequirements2 requirements{
+        .sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2,
+        .pNext = nullptr,
+        .memoryRequirements = {},
+    };
+    dld.vkGetBufferMemoryRequirements2(logical, &requirements_info, &requirements);
+    const VkMemoryRequirements& req = requirements.memoryRequirements;
+    const VkDeviceSize offset = static_cast<VkDeviceSize>(ptr - import->begin);
+    const bool fits = (req.memoryTypeBits & (1U << memory_type)) != 0 &&
+                      offset % (std::max<VkDeviceSize>)(req.alignment, 1) == 0 &&
+                      offset + req.size <= static_cast<VkDeviceSize>(import->end - import->begin);
+    if (!fits || dld.vkBindBufferMemory(logical, handle, import->memory, offset) != VK_SUCCESS) {
+        dld.vkDestroyBuffer(logical, handle, nullptr);
+        return {};
+    }
+    const vk::MemoryLocation location{
+        .memory = import->memory,
+        .offset = offset,
+        .memory_type = memory_type,
+    };
+    return vk::Buffer(handle, logical, device.GetAllocator(), nullptr,
+                      std::span<u8>{ptr, static_cast<size_t>(ci.size)}, true, location, dld);
 }
 
 VkBufferView Buffer::View(u32 offset, u32 size, VideoCore::Surface::PixelFormat format) {
@@ -464,6 +632,25 @@ void BufferCacheRuntime::TickFrame(Common::SlotVector<Buffer>& slot_buffers) noe
             LOG_INFO(Render_Vulkan, "PERF uma direct {} calls {} KiB, staged {} calls {} KiB",
                      uma_direct_calls.exchange(0), uma_direct_bytes.exchange(0) >> 10,
                      uma_staged_calls.exchange(0), uma_staged_bytes.exchange(0) >> 10);
+            if (host_alias_pool) {
+                u64 live = 0;
+                u64 live_bytes = 0;
+                for (auto it = slot_buffers.begin(); it != slot_buffers.end(); it++) {
+                    if (it->IsHostAliased()) {
+                        ++live;
+                        live_bytes += it->SizeBytes();
+                    }
+                }
+                auto& s = host_alias_stats;
+                LOG_INFO(Render_Vulkan,
+                         "PERF uma alias live {} ({} KiB), created {} ({} KiB), imports {} "
+                         "({} MiB), noncontiguous {}, forbidden {}, rejected {}, dealiased {}, "
+                         "host-synced fences {}",
+                         live, live_bytes >> 10, s.buffers, s.bytes >> 10,
+                         host_alias_pool->ImportCount(), host_alias_pool->ImportedBytes() >> 20,
+                         s.noncontiguous, s.forbidden, s.rejected, s.dealiased, s.fences);
+                s = {};
+            }
         }
     }
     for (auto it = slot_buffers.begin(); it != slot_buffers.end(); it++) {
@@ -571,6 +758,74 @@ void BufferCacheRuntime::HostReadBarrier() {
         cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0,
                                HOST_READ_BARRIER);
     });
+}
+
+void BufferCacheRuntime::BindDeviceMemory(Tegra::MaxwellDeviceMemoryManager& device_memory_) {
+    device_memory = &device_memory_;
+    if (!device.IsUmaHostAlias()) {
+        return;
+    }
+    host_alias_pool = std::make_unique<HostAliasPool>(device, device_memory->GetPhysicalBacking());
+    if (!host_alias_pool->IsUsable()) {
+        host_alias_pool.reset();
+        return;
+    }
+    host_alias_forbidden.assign(((1ULL << Tegra::MaxwellDeviceMemoryManager::AS_BITS) >> 16) / 64, 0);
+}
+
+bool BufferCacheRuntime::CountHostSyncedFence() noexcept {
+    if (!HasHostAliases()) {
+        return false;
+    }
+    ++host_alias_stats.fences;
+    return true;
+}
+
+void BufferCacheRuntime::ForbidHostAlias(DAddr addr, u64 size) {
+    if (host_alias_forbidden.empty() || size == 0) {
+        return;
+    }
+    for (u64 page = addr >> 16; page <= (addr + size - 1) >> 16; ++page) {
+        host_alias_forbidden[page / 64] |= 1ULL << (page % 64);
+    }
+    ++host_alias_stats.dealiased;
+}
+
+vk::Buffer BufferCacheRuntime::CreateHostAliasBuffer(DAddr addr, u64 size,
+                                                     bool sparse_compatible) {
+    if (!host_alias_pool || sparse_compatible || addr == 0 || size == 0) {
+        return {};
+    }
+    for (u64 page = addr >> 16; page <= (addr + size - 1) >> 16; ++page) {
+        if ((host_alias_forbidden[page / 64] >> (page % 64)) & 1) {
+            ++host_alias_stats.forbidden;
+            return {};
+        }
+    }
+    u8* const ptr = device_memory->GetSpan(addr, size);
+    if (!ptr) {
+        ++host_alias_stats.noncontiguous;
+        return {};
+    }
+    const VkBufferCreateInfo buffer_ci{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .size = size,
+        .usage = CacheBufferUsage(device),
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = nullptr,
+    };
+    vk::Buffer result = host_alias_pool->CreateBuffer(ptr, buffer_ci);
+    if (!result) {
+        ++host_alias_stats.rejected;
+        return {};
+    }
+    ++host_alias_stats.buffers;
+    host_alias_stats.bytes += size;
+    has_host_aliases.store(true, std::memory_order_relaxed);
+    return result;
 }
 
 void BufferCacheRuntime::PostCopyBarrier() {

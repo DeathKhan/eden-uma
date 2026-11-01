@@ -402,6 +402,7 @@ void MemoryManager::WriteBlockImpl(GPUVAddr gpu_dest_addr, const void* src_buffe
         if (!unsafe) {
             rasterizer->InvalidateRegion(dev_addr_base, copy_amount, which);
         }
+        rasterizer->OnGpuThreadWrite(dev_addr_base, copy_amount);
         u8* physical = memory.GetPointer<u8>(dev_addr_base);
         std::memcpy(physical, src_buffer, copy_amount);
         src_buffer = static_cast<const u8*>(src_buffer) + copy_amount;
@@ -411,6 +412,7 @@ void MemoryManager::WriteBlockImpl(GPUVAddr gpu_dest_addr, const void* src_buffe
         if (!unsafe) {
             rasterizer->InvalidateRegion(dev_addr_base, copy_amount, which);
         }
+        rasterizer->OnGpuThreadWrite(dev_addr_base, copy_amount);
         if (!IsBigPageContinuous(page_index)) [[unlikely]] {
             memory.WriteBlockUnsafe(dev_addr_base, src_buffer, copy_amount);
         } else {

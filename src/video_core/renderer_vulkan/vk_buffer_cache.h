@@ -6,7 +6,11 @@
 
 #pragma once
 
+#include <atomic>
 #include <limits>
+#include <memory>
+#include <span>
+#include <vector>
 
 #include <boost/container/small_vector.hpp>
 
@@ -30,6 +34,48 @@ class Scheduler;
 struct HostVertexBinding;
 
 class BufferCacheRuntime;
+
+/// UMA host aliasing: imports guest RAM (the memfd backing behind the device memory manager)
+/// with VK_EXT_external_memory_host in 64 MiB granules on first use, and creates cache buffers
+/// that are bound straight to it. The GPU then reads and writes guest memory in place.
+class HostAliasPool {
+public:
+    explicit HostAliasPool(const Device& device, std::span<u8> backing);
+    ~HostAliasPool();
+
+    HostAliasPool(const HostAliasPool&) = delete;
+    HostAliasPool& operator=(const HostAliasPool&) = delete;
+
+    /// Buffer whose memory is [ptr, ptr + size) of guest RAM; empty if that is not possible.
+    [[nodiscard]] vk::Buffer CreateBuffer(u8* ptr, VkBufferCreateInfo ci);
+
+    [[nodiscard]] bool IsUsable() const noexcept {
+        return memory_type != INVALID_TYPE;
+    }
+    [[nodiscard]] size_t ImportCount() const noexcept {
+        return imports.size();
+    }
+    [[nodiscard]] u64 ImportedBytes() const noexcept {
+        return imported_bytes;
+    }
+
+private:
+    struct Import {
+        u8* begin;
+        u8* end;
+        VkDeviceMemory memory;
+    };
+    static constexpr u32 INVALID_TYPE = ~0U;
+
+    const Import* FindOrImport(u8* ptr, u64 size);
+
+    const Device& device;
+    std::span<u8> backing;
+    u32 memory_type = INVALID_TYPE;
+    std::vector<Import> imports;
+    u64 imported_bytes = 0;
+    bool import_failed = false;
+};
 
 class Buffer : public VideoCommon::BufferBase {
 public:
@@ -86,6 +132,22 @@ public:
 
     void FlushDirectWrite(u64 offset, u64 size) noexcept;
 
+    /// UMA host aliasing: this buffer's memory is guest RAM itself.
+    [[nodiscard]] bool IsHostAliased() const noexcept {
+        return host_aliased;
+    }
+
+    /// GPU work recorded for this buffer may not have finished yet.
+    [[nodiscard]] bool IsGpuBusy() const noexcept;
+
+    /// The device mapping behind an aliased buffer changed; it must be recreated before use.
+    void MarkHostAliasStale() noexcept {
+        host_alias_stale = true;
+    }
+    [[nodiscard]] bool IsHostAliasStale() const noexcept {
+        return host_alias_stale;
+    }
+
     void ResetUsageTracking() noexcept {
         tracker.Reset();
     }
@@ -117,6 +179,8 @@ private:
     u64 untracked_use_tick{};
     bool is_null{};
     bool sparse_compatible{};
+    bool host_aliased{};
+    bool host_alias_stale{};
 };
 
 class QuadArrayIndexBuffer;
@@ -173,6 +237,18 @@ public:
 
     /// UMA readback: make all prior GPU writes available to host reads (pair with Finish()).
     void HostReadBarrier();
+
+    /// UMA host aliasing (see HostAliasPool).
+    void BindDeviceMemory(Tegra::MaxwellDeviceMemoryManager& device_memory);
+    [[nodiscard]] bool HasHostAliases() const noexcept {
+        return has_host_aliases.load(std::memory_order_relaxed);
+    }
+    /// Called once per guest fence; true when the fence has to wait for the host GPU.
+    bool CountHostSyncedFence() noexcept;
+    /// Keeps [addr, addr + size) out of aliasing from now on.
+    void ForbidHostAlias(DAddr addr, u64 size);
+    /// Aliased cache buffer for [addr, addr + size), or an empty buffer.
+    [[nodiscard]] vk::Buffer CreateHostAliasBuffer(DAddr addr, u64 size, bool sparse_compatible);
 
     void ClearBuffer(VkBuffer dest_buffer, u32 offset, size_t size, u32 value);
 
@@ -301,6 +377,20 @@ private:
 
     bool limit_dynamic_storage_buffers = false;
     u32 max_dynamic_storage_buffers = (std::numeric_limits<u32>::max)();
+
+    Tegra::MaxwellDeviceMemoryManager* device_memory = nullptr;
+    std::unique_ptr<HostAliasPool> host_alias_pool;
+    std::vector<u64> host_alias_forbidden; ///< Bit per 64 KiB device page.
+    std::atomic<bool> has_host_aliases{false};
+    struct HostAliasStats {
+        u64 buffers = 0;
+        u64 bytes = 0;
+        u64 noncontiguous = 0;
+        u64 forbidden = 0;
+        u64 rejected = 0;
+        u64 dealiased = 0;
+        u64 fences = 0;
+    } host_alias_stats;
 };
 
 struct BufferCacheParams {

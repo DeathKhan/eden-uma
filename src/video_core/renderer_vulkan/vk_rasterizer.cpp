@@ -841,6 +841,23 @@ void RasterizerVulkan::UnmapMemory(DAddr addr, u64 size) {
     pipeline_cache.OnCacheInvalidation(addr, size);
 }
 
+void RasterizerVulkan::OnDeviceMemoryUnmap(DAddr addr, u64 size) {
+    if (!buffer_cache_runtime.HasHostAliases()) {
+        return;
+    }
+    std::scoped_lock lock{buffer_cache.mutex};
+    buffer_cache.OnDeviceMemoryUnmap(addr, size);
+}
+
+void RasterizerVulkan::OnGpuThreadWrite(DAddr addr, u64 size) {
+    // Writes from other threads (fence callbacks) run after the GPU work they order against.
+    if (!buffer_cache_runtime.HasHostAliases() || !VideoCore::is_gpu_command_thread) {
+        return;
+    }
+    std::scoped_lock lock{buffer_cache.mutex};
+    buffer_cache.PrepareGpuThreadWrite(addr, size);
+}
+
 void RasterizerVulkan::ModifyGPUMemory(size_t as_id, GPUVAddr addr, u64 size) {
     {
         std::scoped_lock lock{texture_cache.mutex};

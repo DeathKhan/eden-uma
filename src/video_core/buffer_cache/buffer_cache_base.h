@@ -245,6 +245,23 @@ public:
 
     bool InlineMemory(DAddr dest_address, size_t copy_size, std::span<const u8> inlined_buffer);
 
+    /// UMA host aliasing: a GPU engine is about to write [device_addr, device_addr + size) with
+    /// the CPU. Aliased buffers there that in-flight GPU work may read are waited on and
+    /// recreated as ordinary buffers, so the write cannot reach work recorded before it.
+    void PrepareGpuThreadWrite(DAddr device_addr, u64 size);
+
+    /// UMA host aliasing: the device mapping of the range is going away.
+    void OnDeviceMemoryUnmap(DAddr device_addr, u64 size);
+
+    /// UMA host aliasing is active: guest fences must wait for the host GPU.
+    [[nodiscard]] bool NeedsHostSyncedFences() noexcept {
+        if constexpr (requires { runtime.CountHostSyncedFence(); }) {
+            return runtime.CountHostSyncedFence();
+        } else {
+            return false;
+        }
+    }
+
     void BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr gpu_addr, u32 size);
 
     void DisableGraphicsUniformBuffer(size_t stage, u32 index);
@@ -368,6 +385,14 @@ private:
 
             const DAddr end_addr = buffer.CpuAddr() + buffer.SizeBytes();
             page = Common::DivCeil(end_addr, CACHING_PAGESIZE);
+        }
+    }
+
+    static bool IsHostAliased(const Buffer& buffer) noexcept {
+        if constexpr (requires { buffer.IsHostAliased(); }) {
+            return buffer.IsHostAliased();
+        } else {
+            return false;
         }
     }
 
@@ -520,6 +545,9 @@ private:
     Common::OverlapRangeSet<DAddr> async_downloads;
     std::deque<std::optional<Async_Buffer>> async_buffers;
     std::deque<boost::container::small_vector<BufferCopy, 4>> pending_downloads;
+    // GPU-modified ranges of host-aliased buffers per async flush (one entry per async_buffers
+    // entry): nothing to copy, they only stop being GPU-modified once the fence passes.
+    std::deque<boost::container::small_vector<std::pair<DAddr, u64>, 4>> pending_alias_clears;
     std::optional<Async_Buffer> current_buffer;
 
     std::deque<Async_Buffer> async_buffers_death_ring;

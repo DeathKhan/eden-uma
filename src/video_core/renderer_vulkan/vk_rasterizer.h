@@ -110,6 +110,8 @@ public:
     bool OnCPUWriteSpeculative(DAddr addr, u64 size) override;
     void InvalidateGPUCache() override;
     void UnmapMemory(DAddr addr, u64 size) override;
+    void OnDeviceMemoryUnmap(DAddr addr, u64 size) override;
+    void OnGpuThreadWrite(DAddr addr, u64 size) override;
     void ModifyGPUMemory(size_t as_id, GPUVAddr addr, u64 size) override;
     void SignalFence(std::function<void()>&& func) override;
     void SyncOperation(std::function<void()>&& func) override;

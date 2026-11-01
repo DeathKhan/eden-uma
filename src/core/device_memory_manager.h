@@ -67,6 +67,12 @@ public:
         TrackContinuityImpl(address, virtual_address, size, asid);
     }
 
+    /// Host mapping of all guest physical memory. It is never remapped or protected while the
+    /// emulated system runs, so it can be imported into a host graphics API.
+    [[nodiscard]] std::span<u8> GetPhysicalBacking() const noexcept {
+        return {reinterpret_cast<u8*>(physical_base), physical_size};
+    }
+
     // Write / Read
     template <typename T>
     T* GetPointer(DAddr address);
@@ -175,6 +181,7 @@ private:
     std::unique_ptr<DeviceMemoryManagerAllocator<Traits>> impl;
 
     const uintptr_t physical_base;
+    const size_t physical_size;
     DeviceInterface* device_inter;
 
     struct TrackedEntry {
