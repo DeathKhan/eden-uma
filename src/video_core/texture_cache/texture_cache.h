@@ -1716,6 +1716,7 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         join_alias_indices.emplace(aliased_id, alias_index);
         new_image.flags |= ImageFlagBits::Alias;
     }
+    ++alias_epoch; // new aliases (and copied modification ticks below)
     for (const ImageId aliased_id : join_bad_overlap_ids) {
         ImageBase& aliased = slot_images[aliased_id];
         aliased.overlapping_images.push_back(new_image_id);
@@ -2474,12 +2475,18 @@ template <class P>
 void TextureCache<P>::MarkModification(ImageBase& image) noexcept {
     image.flags |= ImageFlagBits::GpuModified;
     image.modification_tick = ++modification_tick;
+    ++alias_epoch;
 }
 
 template <class P>
 void TextureCache<P>::SynchronizeAliases(ImageId image_id) {
-    boost::container::small_vector<const AliasedImage*, 8> aliased_images;
     Image& image = slot_images[image_id];
+    // Nothing that could make an alias newer than this image happened since its last sync.
+    if (image.alias_synced_epoch == alias_epoch) {
+        return;
+    }
+    image.alias_synced_epoch = alias_epoch;
+    boost::container::small_vector<const AliasedImage*, 8> aliased_images;
     bool any_rescaled = True(image.flags & ImageFlagBits::Rescaled);
     bool any_modified = True(image.flags & ImageFlagBits::GpuModified);
     u64 most_recent_tick = image.modification_tick;
@@ -2504,6 +2511,8 @@ void TextureCache<P>::SynchronizeAliases(ImageId image_id) {
         }
     }
     image.modification_tick = most_recent_tick;
+    // Other images aliasing this one may now be older than it; the copies below also mark.
+    image.alias_synced_epoch = ++alias_epoch;
     if (any_modified) {
         image.flags |= ImageFlagBits::GpuModified;
     }

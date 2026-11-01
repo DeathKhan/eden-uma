@@ -1567,8 +1567,11 @@ void BufferCache<P>::UpdateVertexBuffers() {
     }
     flags[Dirty::VertexBuffers] = false;
 
+    const auto& dirty = maxwell3d->dirty.flags;
     for (u32 index = 0; index < NUM_VERTEX_BUFFERS; ++index) {
-        UpdateVertexBuffer(index);
+        if (dirty[Dirty::VertexBuffer0 + index]) { // skip the call for clean slots
+            UpdateVertexBuffer(index);
+        }
     }
 }
 

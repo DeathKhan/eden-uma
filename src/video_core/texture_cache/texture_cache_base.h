@@ -506,6 +506,9 @@ private:
     Common::ScratchBuffer<u8> unswizzle_data_buffer;
 
     u64 modification_tick = 0;
+    /// Bumped whenever an image's modification tick or alias list can change; an image synced at
+    /// the current epoch cannot have a newer alias (see SynchronizeAliases).
+    u64 alias_epoch = 1;
     u64 frame_tick = 0;
 
     Common::ThreadWorker texture_decode_worker{1, "TextureDecoder", {},
