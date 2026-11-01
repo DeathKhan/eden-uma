@@ -67,6 +67,15 @@ public:
     /// UMA fast path: mapped span if the buffer is host-visible and idle on the GPU, else empty.
     [[nodiscard]] std::span<u8> DirectWriteSpan() noexcept;
 
+    /// UMA readback: mapped span if the buffer is host-visible+coherent on the UMA path.
+    [[nodiscard]] std::span<const u8> DirectReadSpan() const noexcept {
+        if (!device || is_null || !buffer.IsHostVisible() || !buffer.IsHostCoherent() ||
+            !device->IsUmaFastPath()) {
+            return {};
+        }
+        return buffer.Mapped();
+    }
+
     void FlushDirectWrite(u64 offset, u64 size) noexcept;
 
     void ResetUsageTracking() noexcept {
@@ -152,6 +161,9 @@ public:
                     bool can_reorder_upload = false);
 
     void PostCopyBarrier();
+
+    /// UMA readback: make all prior GPU writes available to host reads (pair with Finish()).
+    void HostReadBarrier();
 
     void ClearBuffer(VkBuffer dest_buffer, u32 offset, size_t size, u32 value);
 

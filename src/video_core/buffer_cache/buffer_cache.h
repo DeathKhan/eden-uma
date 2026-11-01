@@ -1960,6 +1960,20 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
         return;
     }
 
+    if constexpr (requires { buffer.DirectReadSpan(); runtime.HostReadBarrier(); }) {
+        // UMA: the cache buffer itself is host-visible+coherent; wait for the GPU and read it
+        // in place instead of copying into a download staging buffer first.
+        const std::span<const u8> direct = buffer.DirectReadSpan();
+        if (!direct.empty()) {
+            runtime.HostReadBarrier();
+            runtime.Finish();
+            for (const BufferCopy& copy : copies) {
+                device_memory.WriteBlockUnsafe(buffer.CpuAddr() + copy.src_offset,
+                                               direct.data() + copy.src_offset, copy.size);
+            }
+            return;
+        }
+    }
     if constexpr (USE_MEMORY_MAPS) {
         auto download_staging = runtime.DownloadStagingBuffer(total_size_bytes);
         const u8* const mapped_memory = download_staging.mapped_span.data();
