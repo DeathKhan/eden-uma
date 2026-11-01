@@ -119,13 +119,22 @@ void TextureCache<P>::RunGarbageCollector() {
     bool aggressive_mode = false;
     u64 ticks_to_destroy = 0;
     size_t num_iterations = 0;
+    // Evicted GPU-modified images: copies are recorded as images are evicted, then one wait
+    // covers all of them before writing them back to guest memory (was a drain per image).
+    struct PendingWriteback {
+        decltype(runtime.DownloadStagingBuffer(0)) map;
+        ImageInfo info;
+        GPUVAddr gpu_addr;
+    };
+    boost::container::small_vector<PendingWriteback, 8> writebacks;
     const auto Configure = [&](bool allow_aggressive) {
         high_priority_mode = total_used_memory >= expected_memory;
         aggressive_mode = allow_aggressive && total_used_memory >= critical_memory;
         ticks_to_destroy = aggressive_mode ? 10ULL : high_priority_mode ? 25ULL : 50ULL;
         num_iterations = aggressive_mode ? 40 : (high_priority_mode ? 20 : 10);
     };
-    const auto Cleanup = [this, &num_iterations, &high_priority_mode, &aggressive_mode](ImageId image_id) {
+    const auto Cleanup = [this, &num_iterations, &high_priority_mode, &aggressive_mode,
+                          &writebacks](ImageId image_id) {
         if (num_iterations == 0) {
             return true;
         }
@@ -140,16 +149,15 @@ void TextureCache<P>::RunGarbageCollector() {
         }
         if (must_download) {
             auto map = runtime.DownloadStagingBuffer(image.unswizzled_size_bytes);
-            const auto copies = FullDownloadCopies(image.info);
-            image.DownloadMemory(map, copies);
-            runtime.Finish();
-            SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies, map.mapped_span, swizzle_data_buffer);
+            image.DownloadMemory(map, FullDownloadCopies(image.info));
+            writebacks.push_back({map, image.info, image.gpu_addr});
         }
         if (True(image.flags & ImageFlagBits::Tracked)) {
             UntrackImage(image, image_id);
         }
         UnregisterImage(image_id);
-        DeleteImage(image_id, image.scale_tick > frame_tick + 5);
+        // A recorded download still reads the image: never destroy it immediately then.
+        DeleteImage(image_id, !must_download && image.scale_tick > frame_tick + 5);
         if (aggressive_mode && total_used_memory < critical_memory) {
             num_iterations >>= 2;
             aggressive_mode = false;
@@ -164,6 +172,14 @@ void TextureCache<P>::RunGarbageCollector() {
     if (total_used_memory >= critical_memory) {
         Configure(true);
         lru_cache.ForEachItemBelow(frame_tick - ticks_to_destroy, Cleanup);
+    }
+    if (!writebacks.empty()) {
+        runtime.Finish();
+        for (auto& writeback : writebacks) {
+            SwizzleImage(*gpu_memory, writeback.gpu_addr, writeback.info,
+                         FullDownloadCopies(writeback.info), writeback.map.mapped_span,
+                         swizzle_data_buffer);
+        }
     }
 }
 

@@ -140,6 +140,10 @@ public:
     /// GPU work recorded for this buffer may not have finished yet.
     [[nodiscard]] bool IsGpuBusy() const noexcept;
 
+    /// GPU work that may access [offset, offset + size) has not finished yet (range-granular
+    /// last-use ticks plus untracked whole-buffer uses).
+    [[nodiscard]] bool IsRangeBusy(u64 offset, u64 size) const noexcept;
+
     /// Tick of the last recorded GPU use of this buffer.
     [[nodiscard]] u64 GpuUseTick() const noexcept {
         return gpu_use_tick;
@@ -186,6 +190,11 @@ private:
     bool sparse_compatible{};
     bool host_aliased{};
     bool host_alias_stale{};
+    /// Last GPU-use tick per 16 KiB of the buffer. Unlike the usage tracker (which only resets
+    /// once the whole buffer is idle), this tells which ranges of a constantly used buffer are
+    /// free again.
+    static constexpr u64 USE_PAGE_SHIFT = 14;
+    std::vector<u64> use_ticks;
 };
 
 class QuadArrayIndexBuffer;

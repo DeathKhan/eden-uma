@@ -213,6 +213,9 @@ bool BufferCache<P>::DMACopy(GPUVAddr src_address, GPUVAddr dest_address, u64 am
     }
 
     ClearDownload(*cpu_dest_address, amount);
+    // The CPU mirror below writes the destination now: earlier GPU work reading it from an
+    // aliased buffer must finish first. Checked before this copy marks the range as in use.
+    PrepareGpuThreadWrite(*cpu_dest_address, amount);
 
     BufferId buffer_a;
     BufferId buffer_b;
@@ -258,7 +261,6 @@ bool BufferCache<P>::DMACopy(GPUVAddr src_address, GPUVAddr dest_address, u64 am
         }
     }
 
-    PrepareGpuThreadWrite(*cpu_dest_address, amount);
     Tegra::Memory::DeviceGuestMemoryScoped<u8, Tegra::Memory::GuestMemoryFlags::UnsafeReadWrite>
         tmp(device_memory, *cpu_src_address, amount, &tmp_buffer);
     tmp.SetAddressAndSize(*cpu_dest_address, amount);
@@ -2202,7 +2204,10 @@ void BufferCache<P>::PrepareGpuThreadWrite(DAddr device_addr, u64 size) {
         runtime.MarkEngineWritten(device_addr, size);
         boost::container::small_vector<BufferId, 4> busy;
         ForEachBufferInRange(device_addr, size, [&](BufferId buffer_id, Buffer& buffer) {
-            if (buffer.IsHostAliased() && buffer.IsGpuBusy()) {
+            const DAddr start = (std::max)(device_addr, buffer.CpuAddr());
+            const DAddr end = (std::min)(device_addr + size, buffer.CpuAddr() + buffer.SizeBytes());
+            if (buffer.IsHostAliased() && start < end &&
+                buffer.IsRangeBusy(start - buffer.CpuAddr(), end - start)) {
                 busy.push_back(buffer_id);
             }
         });

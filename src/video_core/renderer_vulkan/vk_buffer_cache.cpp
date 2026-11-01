@@ -139,6 +139,7 @@ Buffer::Buffer(BufferCacheRuntime& runtime, DAddr cpu_addr_, u64 size_bytes_,
       buffer{runtime.CreateHostAliasBuffer(cpu_addr_, SizeBytes(), sparse_compatible_)},
       tracker{SizeBytes()} {
     host_aliased = static_cast<bool>(buffer);
+    use_ticks.assign((SizeBytes() >> USE_PAGE_SHIFT) + 1, 0);
     if (!host_aliased) {
         buffer = CreateBuffer(*device, runtime.memory_allocator, SizeBytes(),
                               runtime.SparseAlignmentFor(sparse_compatible_));
@@ -156,6 +157,28 @@ void Buffer::MarkUsage(u64 offset, u64 size) noexcept {
     tracker.Track(offset, size);
     last_usage_tick = scheduler->CurrentTick();
     gpu_use_tick = last_usage_tick;
+    if (size == 0 || use_ticks.empty()) {
+        return;
+    }
+    const u64 last = (std::min<u64>)((offset + size - 1) >> USE_PAGE_SHIFT, use_ticks.size() - 1);
+    for (u64 page = offset >> USE_PAGE_SHIFT; page <= last; ++page) {
+        use_ticks[page] = last_usage_tick;
+    }
+}
+
+bool Buffer::IsRangeBusy(u64 offset, u64 size) const noexcept {
+    if (!scheduler->IsFree(untracked_use_tick)) {
+        return true;
+    }
+    if (size == 0 || use_ticks.empty()) {
+        return false;
+    }
+    const u64 last = (std::min<u64>)((offset + size - 1) >> USE_PAGE_SHIFT, use_ticks.size() - 1);
+    u64 newest = 0;
+    for (u64 page = offset >> USE_PAGE_SHIFT; page <= last; ++page) {
+        newest = (std::max)(newest, use_ticks[page]);
+    }
+    return !scheduler->IsFree(newest);
 }
 
 bool Buffer::IsGpuBusy() const noexcept {
@@ -188,8 +211,7 @@ std::atomic<u64> uma_direct_bytes{0}, uma_staged_bytes{0}, uma_direct_calls{0}, 
 
 std::span<u8> Buffer::DirectWriteRange(u64 offset, u64 size) noexcept {
     const bool ok = device && !is_null && buffer.IsHostVisible() && buffer.IsHostCoherent() &&
-                    device->IsUmaDirectWrite() && scheduler->IsFree(untracked_use_tick) &&
-                    !tracker.IsUsed(offset, size);
+                    device->IsUmaDirectWrite() && !IsRangeBusy(offset, size);
     (ok ? uma_direct_bytes : uma_staged_bytes).fetch_add(size, std::memory_order_relaxed);
     (ok ? uma_direct_calls : uma_staged_calls).fetch_add(1, std::memory_order_relaxed);
     if (!ok) {
