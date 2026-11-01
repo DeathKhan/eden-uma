@@ -349,6 +349,10 @@ public:
                Settings::values.uma_host_alias.GetValue() &&
                Settings::values.use_asynchronous_gpu_emulation.GetValue();
     }
+    /// UMA lean: drop staging/sync passes that only a separate-memory GPU needs.
+    bool IsUmaLean() const {
+        return IsUmaZeroCopy() && Settings::values.uma_lean.GetValue();
+    }
 
     VkDriverIdKHR GetDriverID() const {
         return properties.driver.driverID;

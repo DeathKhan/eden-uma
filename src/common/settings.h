@@ -715,6 +715,8 @@ struct Values {
     // Cache buffers alias guest RAM (VK_EXT_external_memory_host): no uploads, no CPU-write
     // tracking for them, and guest fences wait for the host GPU.
     Setting<bool> uma_host_alias{linkage, true, "uma_host_alias", Category::RendererAdvanced};
+    // Skip bookkeeping/sync only a discrete-memory GPU needs (requires uma_zero_copy).
+    Setting<bool> uma_lean{linkage, true, "uma_lean", Category::RendererAdvanced};
     Setting<bool> renderer_debug{linkage, false, "debug", Category::RendererDebug};
     Setting<bool> renderer_shader_feedback{linkage, false, "shader_feedback",
                                            Category::RendererDebug};
