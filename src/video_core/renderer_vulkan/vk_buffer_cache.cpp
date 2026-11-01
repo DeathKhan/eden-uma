@@ -6,6 +6,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <bit>
 #include <array>
 #include <cstring>
 #include <span>
@@ -384,9 +385,18 @@ public:
             return;
         }
 
-        scheduler.Finish();
+        // Grow geometrically so regrowth is rare, and retire the old buffer until the GPU is
+        // done with it instead of draining the whole GPU with Finish().
+        u32 grown = (std::max)(num_indices_, num_indices > (1u << 29) ? num_indices_ : num_indices * 2);
+        if (grown <= (1u << 30)) {
+            grown = std::bit_ceil((std::max)(grown, 1024u));
+        }
+        std::erase_if(retired, [this](const Retired& r) { return scheduler.IsFree(r.tick); });
+        if (buffer) {
+            retired.push_back(Retired{std::move(buffer), scheduler.CurrentTick()});
+        }
 
-        num_indices = num_indices_;
+        num_indices = grown;
         index_type = IndexTypeFromNumElements(device, num_indices);
 
         const u32 num_quads = GetQuadsNum(num_indices);
@@ -476,6 +486,11 @@ protected:
     Scheduler& scheduler;
     StagingBufferPool& staging_pool;
 
+    struct Retired {
+        vk::Buffer buffer;
+        u64 tick;
+    };
+    std::vector<Retired> retired;
     vk::Buffer buffer{};
     MemoryCommit memory_commit{};
     VkIndexType index_type{};
