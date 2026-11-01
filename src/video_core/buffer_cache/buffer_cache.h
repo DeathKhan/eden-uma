@@ -975,7 +975,11 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
     const DAddr device_addr = binding.device_addr;
     const u32 size = (std::min)(binding.size, (*channel_state->uniform_buffer_sizes)[stage][index]);
     Buffer& buffer = slot_buffers[binding.buffer_id];
-    TouchBuffer(buffer, binding.buffer_id);
+    // LRU only: the stream (snapshot) path below never lets the GPU read this buffer, so a GPU
+    // use is only recorded (MarkUsage) on the cached path.
+    if (binding.buffer_id != NULL_BUFFER_ID) {
+        lru_cache.Touch(buffer.getLRUID(), frame_tick);
+    }
     const bool has_host_buffer = binding.buffer_id != NULL_BUFFER_ID;
     const u32 offset = has_host_buffer ? buffer.Offset(device_addr) : 0;
     const bool needs_alignment_stream = [&]() {
@@ -1020,6 +1024,9 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
     // Classic cached path
     if (SynchronizeBuffer(buffer, device_addr, size)) {
         ++channel_state->uniform_cache_hits[0];
+    }
+    if constexpr (requires { buffer.MarkGpuUse(); }) {
+        buffer.MarkGpuUse(); // also when the binding is skipped below: the GPU still reads it
     }
     // Skip binding if it's not needed and if the bound buffer is not the fast version
     // This exists to avoid instances where the fast buffer is bound and a GPU write happens
@@ -1219,7 +1226,9 @@ void BufferCache<P>::BindHostComputeUniformBuffers() {
     ForEachEnabledBit(channel_state->enabled_compute_uniform_buffer_mask, [&](u32 index) {
         const Binding& binding = channel_state->compute_uniform_buffers[index];
         Buffer& buffer = slot_buffers[binding.buffer_id];
-        TouchBuffer(buffer, binding.buffer_id);
+        if (binding.buffer_id != NULL_BUFFER_ID) {
+            lru_cache.Touch(buffer.getLRUID(), frame_tick); // GPU use: MarkUsage below
+        }
         const u32 size =
             (std::min)(binding.size, (*channel_state->compute_uniform_buffer_sizes)[index]);
         const bool has_host_buffer = binding.buffer_id != NULL_BUFFER_ID;

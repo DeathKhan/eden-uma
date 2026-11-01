@@ -1086,8 +1086,13 @@ bool AccelerateDMA::DmaBufferImageCopy(const Tegra::DMA::ImageCopy& copy_info,
         if (offset % BytesPerBlock(image->info.format)) {
             return false;
         }
-        texture_cache.DownloadImageIntoBuffer(image, buffer->Handle(), offset, copy_span,
-                                              buffer_operand.address, buffer_size);
+        if (buffer->IsHostAliased()) {
+            // The buffer is guest RAM: the copy lands there, no second download needed.
+            image->DownloadMemory(buffer->Handle(), offset, copy_span);
+        } else {
+            texture_cache.DownloadImageIntoBuffer(image, buffer->Handle(), offset, copy_span,
+                                                  buffer_operand.address, buffer_size);
+        }
     }
     return true;
 }
