@@ -1018,7 +1018,12 @@ void BufferCache<P>::BindHostVertexBuffers() {
             Buffer& buffer = slot_buffers[binding.buffer_id];
             TouchBuffer(buffer, binding.buffer_id);
             SynchronizeBuffer(buffer, binding.device_addr, binding.size);
+            const u64 tick = UsageTick();
             if (!flags[Dirty::VertexBuffer0 + index]) {
+                if (vertex_usage_tick[index] != tick) {
+                    vertex_usage_tick[index] = tick;
+                    buffer.MarkUsage(buffer.Offset(binding.device_addr), binding.size);
+                }
                 flush_bindings();
                 continue;
             }
@@ -1026,6 +1031,7 @@ void BufferCache<P>::BindHostVertexBuffers() {
             const u32 stride = maxwell3d->regs.vertex_streams[index].stride;
             const u32 offset = buffer.Offset(binding.device_addr);
             buffer.MarkUsage(offset, binding.size);
+            vertex_usage_tick[index] = tick;
             if (!bindings.buffers.empty() && index != last_index + 1) {
                 flush_bindings();
             }
@@ -1049,6 +1055,11 @@ void BufferCache<P>::BindHostVertexBuffers() {
             TouchBuffer(buffer, binding.buffer_id);
             SynchronizeBuffer(buffer, binding.device_addr, binding.size);
             if (!flags[Dirty::VertexBuffer0 + index]) {
+                const u64 tick = UsageTick();
+                if (vertex_usage_tick[index] != tick) {
+                    vertex_usage_tick[index] = tick;
+                    buffer.MarkUsage(buffer.Offset(binding.device_addr), binding.size);
+                }
                 continue;
             }
             flags[Dirty::VertexBuffer0 + index] = false;

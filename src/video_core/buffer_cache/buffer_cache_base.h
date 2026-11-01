@@ -360,6 +360,17 @@ public:
     std::recursive_mutex mutex;
     Runtime& runtime;
     bool any_buffer_uploaded = false;
+    /// Tick at which each vertex slot last recorded its GPU use (MarkUsage). A slot that stays
+    /// bound across draws is re-marked once per tick so its range never looks idle while draws
+    /// recorded later still read it.
+    std::array<u64, NUM_VERTEX_BUFFERS> vertex_usage_tick{};
+    [[nodiscard]] u64 UsageTick() {
+        if constexpr (requires { runtime.CurrentTick(); }) {
+            return runtime.CurrentTick();
+        } else {
+            return 0; // backends without ticks do not track range usage
+        }
+    }
 
 private:
     template <typename Func>
