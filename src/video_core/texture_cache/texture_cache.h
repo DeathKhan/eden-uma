@@ -559,26 +559,30 @@ ImageViewId TextureCache<P>::VisitImageView(u32 index, bool compute) {
         LOG_DEBUG(HW_GPU, "Invalid image view index={}", index);
         return NULL_IMAGE_VIEW_ID;
     }
-    auto const map_index = index | (compute ? Common::SlotId::TAGGED_VALUE : 0);
+    auto& view_ids = compute ? channel_state->compute_image_view_ids
+                             : channel_state->graphics_image_view_ids;
     // Is new (on the tegra engine side)?
     auto const [descriptor, is_new] = table.Read(*gpu_memory, index);
-    if (is_new) {
+    if (is_new || index >= view_ids.size()) [[unlikely]] {
+        if (index >= view_ids.size()) {
+            view_ids.resize(static_cast<size_t>(index) + 1, NULL_IMAGE_VIEW_ID);
+        }
         if (IsValidEntry(*gpu_memory, descriptor)) {
             // Is new (registered view) on the texture cache side?
             const auto [pair, is_new_tc] = channel_state->image_views.try_emplace(descriptor);
             if (is_new_tc)
                 pair->second = CreateImageView(descriptor);
             PrepareImageView(pair->second, false, false);
-            channel_state->image_view_ids.insert_or_assign(map_index, pair->second);
+            view_ids[index] = pair->second;
             return pair->second;
         }
-        channel_state->image_view_ids.insert_or_assign(map_index, NULL_IMAGE_VIEW_ID);
+        view_ids[index] = NULL_IMAGE_VIEW_ID;
         return NULL_IMAGE_VIEW_ID;
     }
-    auto const it = channel_state->image_view_ids.find(map_index);
-    if (it->second != NULL_IMAGE_VIEW_ID)
-        PrepareImageView(it->second, false, false);
-    return it->second;
+    const ImageViewId view_id = view_ids[index];
+    if (view_id != NULL_IMAGE_VIEW_ID)
+        PrepareImageView(view_id, false, false);
+    return view_id;
 }
 
 template <class P>
@@ -1346,8 +1350,9 @@ void TextureCache<P>::InvalidateScale(Image& image) {
         auto& channel_info = channel_storage[c];
 
         if constexpr (ENABLE_VALIDATION)
-            for (auto& e : channel_info.image_view_ids)
-                e.second = CORRUPT_ID;
+            for (auto* ids : {&channel_info.graphics_image_view_ids,
+                              &channel_info.compute_image_view_ids})
+                std::ranges::fill(*ids, CORRUPT_ID);
         channel_info.graphics_image_table.Invalidate();
         channel_info.compute_image_table.Invalidate();
     }
@@ -2427,8 +2432,9 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
     for (size_t c : active_channel_ids) {
         auto& channel_info = channel_storage[c];
         if constexpr (ENABLE_VALIDATION)
-            for (auto& e : channel_info.image_view_ids)
-                e.second = CORRUPT_ID;
+            for (auto* ids : {&channel_info.graphics_image_view_ids,
+                              &channel_info.compute_image_view_ids})
+                std::ranges::fill(*ids, CORRUPT_ID);
         channel_info.graphics_image_table.Invalidate();
         channel_info.compute_image_table.Invalidate();
     }
@@ -2475,7 +2481,10 @@ template <class P>
 void TextureCache<P>::MarkModification(ImageBase& image) noexcept {
     image.flags |= ImageFlagBits::GpuModified;
     image.modification_tick = ++modification_tick;
-    ++alias_epoch;
+    // Only an image that has aliases can make another image stale (alias lists are mutual).
+    if (!image.aliased_images.empty()) {
+        ++alias_epoch;
+    }
 }
 
 template <class P>
