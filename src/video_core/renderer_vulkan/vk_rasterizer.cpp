@@ -1026,8 +1026,11 @@ void RasterizerVulkan::LoadDiskResources(u64 title_id, std::stop_token stop_load
 
 void RasterizerVulkan::FlushWork() {
 #ifdef __ANDROID__
+    // Every dispatch to a sleeping worker is a futex wake (bionic signals unconditionally);
+    // at every 4 draws that was ~10% of the GPU thread in the LM3 lobby. 16 draws per handoff
+    // still keeps the worker fed, and full chunks dispatch on their own.
     static constexpr u32 DRAWS_TO_DISPATCH = 512;
-    static constexpr u32 CHECK_MASK = 3;
+    static constexpr u32 CHECK_MASK = 15;
 #else
     static constexpr u32 DRAWS_TO_DISPATCH = 4096;
     static constexpr u32 CHECK_MASK = 7;
