@@ -2025,7 +2025,9 @@ void BufferCache<P>::TouchBuffer(Buffer& buffer, BufferId buffer_id) noexcept {
 
 template <class P>
 bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 size) {
-    if (IsHostAliased(buffer)) {
+    // Null bindings (device address 0, e.g. the 32-slot vertex scan) have nothing to upload,
+    // and aliased buffers are guest RAM.
+    if (device_addr == 0 || size == 0 || IsHostAliased(buffer)) {
         return true;
     }
 #ifdef __ANDROID__
