@@ -1606,6 +1606,15 @@ void Device::ReleaseCustomBorderColorSamplers(size_t count) const {
 }
 
 u64 Device::GetDeviceMemoryUsage() const {
+    // Both caches ask every frame, and drivers may answer by parsing /proc/meminfo (Turnip
+    // does, on the GPU thread). Usage moves slowly; refresh at most every 500 ms.
+    const s64 now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count();
+    if (now - memory_usage_query_ms.load(std::memory_order_relaxed) < 500) {
+        return cached_memory_usage.load(std::memory_order_relaxed);
+    }
+    memory_usage_query_ms.store(now, std::memory_order_relaxed);
     VkPhysicalDeviceMemoryBudgetPropertiesEXT budget;
     budget.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT;
     budget.pNext = nullptr;
@@ -1614,6 +1623,7 @@ u64 Device::GetDeviceMemoryUsage() const {
     for (const size_t heap : valid_heap_memory) {
         result += budget.heapUsage[heap];
     }
+    cached_memory_usage.store(result, std::memory_order_relaxed);
     return result;
 }
 

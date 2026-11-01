@@ -1003,6 +1003,8 @@ FN_MAX_LIMIT_LIST
     }
 
     u64 GetDeviceMemoryUsage() const;
+    mutable std::atomic<s64> memory_usage_query_ms{-1000000};
+    mutable std::atomic<u64> cached_memory_usage{0};
 
     u32 GetSetsPerPool() const {
         return sets_per_pool;
