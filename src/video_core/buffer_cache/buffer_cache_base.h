@@ -7,6 +7,7 @@
 #pragma once
 
 #include <algorithm>
+#include <set>
 #include <array>
 #include <bit>
 #include <functional>
@@ -548,6 +549,20 @@ private:
     // GPU-modified ranges of host-aliased buffers per async flush (one entry per async_buffers
     // entry): nothing to copy, they only stop being GPU-modified once the fence passes.
     std::deque<boost::container::small_vector<std::pair<DAddr, u64>, 4>> pending_alias_clears;
+    // UMA lean: async flushes that read straight from the (coherent, mapped) cache buffer instead
+    // of a download staging copy. Parallel to async_buffers; empty entry = not a direct flush.
+    // BufferCopy: src_offset = offset in buffer, dst_offset = device address, size = bytes.
+    struct DirectAsyncCopy {
+        BufferCopy copy;
+        BufferId buffer_id;
+        DAddr buffer_addr; // CpuAddr() at commit; guards against slot reuse
+    };
+    std::deque<boost::container::small_vector<DirectAsyncCopy, 4>> async_direct_downloads;
+    /// Reads (after a GPU wait) pending direct flush entries of buffer_id overlapping the range.
+    /// Returns true if anything was pending.
+    bool DrainDirectAsyncDownloads(BufferId buffer_id, DAddr device_addr, u64 size);
+    // Buffers that were GPU-written while a direct flush was pending: use staged flushes.
+    std::set<BufferId> lean_conflict_buffers;
     std::optional<Async_Buffer> current_buffer;
 
     std::deque<Async_Buffer> async_buffers_death_ring;

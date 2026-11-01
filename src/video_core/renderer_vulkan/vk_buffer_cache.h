@@ -130,6 +130,14 @@ public:
         return buffer.Mapped();
     }
 
+    /// UMA lean: DirectReadSpan gated on uma_lean (async flushes read the cache buffer in place).
+    [[nodiscard]] std::span<const u8> LeanReadSpan() const noexcept {
+        if (!device || !device->IsUmaLean()) {
+            return {};
+        }
+        return DirectReadSpan();
+    }
+
     void FlushDirectWrite(u64 offset, u64 size) noexcept;
 
     /// UMA host aliasing: this buffer's memory is guest RAM itself.

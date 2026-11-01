@@ -589,7 +589,8 @@ void BufferCache<P>::AccumulateFlushes() {
 template <class P>
 bool BufferCache<P>::ShouldWaitAsyncFlushes() const noexcept {
     return (!async_buffers.empty() && async_buffers.front().has_value()) ||
-           (!pending_alias_clears.empty() && !pending_alias_clears.front().empty());
+           (!pending_alias_clears.empty() && !pending_alias_clears.front().empty()) ||
+           (!async_direct_downloads.empty() && !async_direct_downloads.front().empty());
 }
 
 template <class P>
@@ -599,6 +600,7 @@ void BufferCache<P>::CommitAsyncFlushesHigh() {
     if (committed_gpu_modified_ranges.empty()) {
         async_buffers.emplace_back(std::optional<Async_Buffer>{});
         pending_alias_clears.emplace_back();
+        async_direct_downloads.emplace_back();
         return;
     }
 
@@ -668,7 +670,37 @@ void BufferCache<P>::CommitAsyncFlushesHigh() {
     pending_alias_clears.emplace_back(std::move(alias_clears));
     if (downloads.empty()) {
         async_buffers.emplace_back(std::optional<Async_Buffer>{});
+        async_direct_downloads.emplace_back();
         return;
+    }
+    if constexpr (requires { slot_buffers[downloads[0].second].LeanReadSpan(); runtime.HostReadBarrier(); }) {
+        // UMA lean: cache buffers are host-visible+coherent, so the GPU's writes land in memory
+        // the CPU can read once the flush fence signals. Skip the staging buffer + GPU copy
+        // (and its two pipeline barriers); just make GPU writes host-visible and read in place
+        // when the fence pops. Falls back to staging if any buffer is not directly readable.
+        const bool all_direct = std::ranges::all_of(downloads, [&](const auto& d) {
+            return !lean_conflict_buffers.contains(d.second) &&
+                   !slot_buffers[d.second].LeanReadSpan().empty();
+        });
+        if (all_direct) {
+            boost::container::small_vector<DirectAsyncCopy, 4> direct;
+            for (auto& [copy, buffer_id] : downloads) {
+                Buffer& buffer = slot_buffers[buffer_id];
+                const DAddr addr = buffer.CpuAddr() + copy.src_offset;
+                async_downloads.Add(addr, copy.size);
+                // Keep the range from being treated as GPU-idle by direct writes until read.
+                buffer.MarkUsage(copy.src_offset, copy.size);
+                direct.push_back({BufferCopy{.src_offset = copy.src_offset,
+                                             .dst_offset = static_cast<u64>(addr),
+                                             .size = copy.size},
+                                  buffer_id, buffer.CpuAddr()});
+            }
+            runtime.HostReadBarrier();
+            pending_downloads.emplace_back();
+            async_buffers.emplace_back(std::optional<Async_Buffer>{});
+            async_direct_downloads.emplace_back(std::move(direct));
+            return;
+        }
     }
     auto download_staging = runtime.DownloadStagingBuffer(total_size_bytes, true);
     boost::container::small_vector<BufferCopy, 4> normalized_copies;
@@ -688,6 +720,7 @@ void BufferCache<P>::CommitAsyncFlushesHigh() {
     runtime.PostCopyBarrier();
     pending_downloads.emplace_back(std::move(normalized_copies));
     async_buffers.emplace_back(download_staging);
+    async_direct_downloads.emplace_back();
 }
 
 template <class P>
@@ -710,6 +743,39 @@ void BufferCache<P>::PopAsyncBuffers() {
             gpu_modified_ranges.Subtract(start, size);
         }
         pending_alias_clears.pop_front();
+    }
+    if constexpr (requires(const Buffer& b) { b.LeanReadSpan(); }) {
+        if (!async_direct_downloads.empty() && !async_direct_downloads.front().empty()) {
+            // UMA lean direct flush: fence has signalled, read the cache buffer in place.
+            for (const DirectAsyncCopy& d : async_direct_downloads.front()) {
+                if (d.copy.size == 0) {
+                    continue; // already drained by DeleteBuffer
+                }
+                const DAddr device_addr = static_cast<DAddr>(d.copy.dst_offset);
+                const Buffer& buffer = slot_buffers[d.buffer_id];
+                const u8* const src = buffer.LeanReadSpan().data();
+                // Delete/join drain these entries first, so a moved slot should never be seen.
+                ASSERT(buffer.CpuAddr() == d.buffer_addr);
+                if (src != nullptr && buffer.CpuAddr() == d.buffer_addr) {
+                    const u8* const read_mapped_memory = src + d.copy.src_offset;
+                    async_downloads.ForEachInRange(device_addr, d.copy.size,
+                                                   [&](DAddr start, DAddr end, s32) {
+                        device_memory.WriteBlockUnsafe(
+                            start, &read_mapped_memory[start - device_addr], end - start);
+                    });
+                }
+                async_downloads.Subtract(device_addr, d.copy.size, [&](DAddr start, DAddr end) {
+                    gpu_modified_ranges.Subtract(start, end - start);
+                });
+            }
+            async_direct_downloads.pop_front();
+            async_buffers.pop_front();
+            pending_downloads.pop_front();
+            return;
+        }
+    }
+    if (!async_direct_downloads.empty()) {
+        async_direct_downloads.pop_front();
     }
     if (!async_buffers.front().has_value()) {
         async_buffers.pop_front();
@@ -734,6 +800,52 @@ void BufferCache<P>::PopAsyncBuffers() {
     async_buffers_death_ring.emplace_back(*async_buffer);
     async_buffers.pop_front();
     pending_downloads.pop_front();
+}
+
+template <class P>
+bool BufferCache<P>::DrainDirectAsyncDownloads(BufferId buffer_id, DAddr device_addr, u64 size) {
+    // Pending UMA-lean flushes read the live cache buffer when their fence pops. If the buffer
+    // is about to be deleted (slot reuse) or about to be GPU-written again (newer/torn data),
+    // wait for the GPU now and read the overlapping entries before that happens.
+    if constexpr (requires(const Buffer& b) { b.LeanReadSpan(); }) {
+        const DAddr end = device_addr + size;
+        const auto hits = [&](const DirectAsyncCopy& d) {
+            const DAddr d_addr = static_cast<DAddr>(d.copy.dst_offset);
+            return d.buffer_id == buffer_id && d.copy.size != 0 && d_addr < end &&
+                   device_addr < d_addr + d.copy.size;
+        };
+        bool pending = false;
+        for (const auto& entry : async_direct_downloads) {
+            pending |= std::ranges::any_of(entry, hits);
+        }
+        if (!pending) {
+            return false;
+        }
+        runtime.Finish();
+        const u8* const src = slot_buffers[buffer_id].LeanReadSpan().data();
+        for (auto& entry : async_direct_downloads) {
+            for (DirectAsyncCopy& d : entry) {
+                if (!hits(d)) {
+                    continue;
+                }
+                const DAddr d_addr = static_cast<DAddr>(d.copy.dst_offset);
+                if (src != nullptr) {
+                    const u8* const read_mapped_memory = src + d.copy.src_offset;
+                    async_downloads.ForEachInRange(d_addr, d.copy.size,
+                                                   [&](DAddr start, DAddr stop, s32) {
+                        device_memory.WriteBlockUnsafe(
+                            start, &read_mapped_memory[start - d_addr], stop - start);
+                    });
+                }
+                async_downloads.Subtract(d_addr, d.copy.size, [&](DAddr start, DAddr stop) {
+                    gpu_modified_ranges.Subtract(start, stop - start);
+                });
+                d.copy.size = 0; // consumed; entry stays so queue alignment is kept
+            }
+        }
+        return true;
+    }
+    return false;
 }
 
 template <class P>
@@ -1617,6 +1729,14 @@ void BufferCache<P>::UpdateComputeTextureBuffers() {
 
 template <class P>
 void BufferCache<P>::MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u32 size, bool needs_sync) {
+    if (!async_direct_downloads.empty()) {
+        // A GPU write is about to be recorded into this range: any pending UMA-lean flush of
+        // it must be read first (stall), and the buffer goes back to staged flushes so a
+        // write-every-frame buffer only pays that stall once.
+        if (DrainDirectAsyncDownloads(buffer_id, device_addr, size)) {
+            lean_conflict_buffers.insert(buffer_id);
+        }
+    }
     if constexpr (!IS_OPENGL) {
         if (needs_sync) {
             Buffer& buffer = slot_buffers[buffer_id];
@@ -2245,6 +2365,8 @@ void BufferCache<P>::OnDeviceMemoryUnmap(DAddr device_addr, u64 size) {
 
 template <class P>
 void BufferCache<P>::DeleteBuffer(BufferId buffer_id, bool do_not_mark) {
+    DrainDirectAsyncDownloads(buffer_id, 0, ~u64{0} >> 1);
+    lean_conflict_buffers.erase(buffer_id);
     if constexpr (requires { runtime.OnBufferDeleted(slot_buffers[buffer_id]); }) {
         runtime.OnBufferDeleted(slot_buffers[buffer_id]);
     }
