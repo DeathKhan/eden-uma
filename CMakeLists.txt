@@ -276,7 +276,10 @@ cmake_dependent_option(YUZU_USE_BUNDLED_MOLTENVK "Download bundled MoltenVK lib"
 option(YUZU_DISABLE_LLVM "Disable LLVM (useful for CI)" OFF)
 
 set(DEFAULT_YUZU_USE_BUNDLED_OPENSSL OFF)
-if (EXT_DEFAULT OR SOLARIS OR OPENBSD)
+# Android builds OpenSSL from source: the prebuilt Android libcrypto is built without assembly,
+# so NCA decryption ran table-based C AES instead of the ARMv8 Crypto Extensions (~4% of all
+# emulator cycles on an Adreno 830 handheld).
+if ((EXT_DEFAULT AND NOT ANDROID) OR SOLARIS OR OPENBSD)
     set(DEFAULT_YUZU_USE_BUNDLED_OPENSSL ON)
 endif()
 
