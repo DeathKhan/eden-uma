@@ -313,6 +313,16 @@ public:
     }
 
     /// Returns the driver ID.
+    /// Odin/UMA fast path: integrated Turnip on Android. Gates zero-copy buffer uploads,
+    /// cached readbacks and the raised integrated memory cap.
+    bool IsUmaFastPath() const {
+#ifdef __ANDROID__
+        return is_integrated && properties.driver.driverID == VK_DRIVER_ID_MESA_TURNIP;
+#else
+        return false;
+#endif
+    }
+
     VkDriverIdKHR GetDriverID() const {
         return properties.driver.driverID;
     }

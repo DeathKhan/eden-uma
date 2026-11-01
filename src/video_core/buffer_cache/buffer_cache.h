@@ -300,6 +300,9 @@ std::pair<typename P::Buffer*, u32> BufferCache<P>::ObtainCPUBuffer(
     DAddr device_addr, u32 size, ObtainBufferSynchronize sync_info, ObtainBufferOperation post_op) {
     const BufferId buffer_id = FindBuffer(device_addr, size, false);
     Buffer& buffer = slot_buffers[buffer_id];
+    if constexpr (requires { buffer.MarkGpuUse(); }) {
+        buffer.MarkGpuUse();
+    }
 
     // synchronize op
     switch (sync_info) {
@@ -1731,6 +1734,9 @@ void BufferCache<P>::ChangeRegister(BufferId buffer_id) {
 
 template <class P>
 void BufferCache<P>::TouchBuffer(Buffer& buffer, BufferId buffer_id) noexcept {
+    if constexpr (requires { buffer.MarkGpuUse(); }) {
+        buffer.MarkGpuUse();
+    }
     if (buffer_id != NULL_BUFFER_ID) {
         lru_cache.Touch(buffer.getLRUID(), frame_tick);
     }
@@ -1839,6 +1845,18 @@ void BufferCache<P>::MappedUploadMemory([[maybe_unused]] Buffer& buffer,
                                         [[maybe_unused]] u64 total_size_bytes,
                                         [[maybe_unused]] std::span<BufferCopy> copies) {
     if constexpr (USE_MEMORY_MAPS) {
+        if constexpr (requires { buffer.DirectWriteSpan(); }) {
+            // UMA zero-copy: buffer idle on the GPU -> write guest memory straight into it.
+            const std::span<u8> direct = buffer.DirectWriteSpan();
+            if (!direct.empty()) {
+                for (const BufferCopy& copy : copies) {
+                    device_memory.ReadBlockUnsafe(buffer.CpuAddr() + copy.dst_offset,
+                                                  direct.data() + copy.dst_offset, copy.size);
+                    buffer.FlushDirectWrite(copy.dst_offset, copy.size);
+                }
+                return;
+            }
+        }
         auto upload_staging = runtime.UploadStagingBuffer(total_size_bytes);
         const std::span<u8> staging_pointer = upload_staging.mapped_span;
         for (BufferCopy& copy : copies) {
@@ -1881,6 +1899,15 @@ void BufferCache<P>::InlineMemoryImplementation(DAddr dest_address, size_t copy_
     auto& buffer = slot_buffers[buffer_id];
     SynchronizeBuffer(buffer, dest_address, static_cast<u32>(copy_size));
 
+    if constexpr (requires { buffer.DirectWriteSpan(); }) {
+        const std::span<u8> direct = buffer.DirectWriteSpan();
+        if (!direct.empty()) {
+            const u64 dst = buffer.Offset(dest_address);
+            std::memcpy(direct.data() + dst, inlined_buffer.data(), copy_size);
+            buffer.FlushDirectWrite(dst, copy_size);
+            return;
+        }
+    }
     if constexpr (USE_MEMORY_MAPS_FOR_UPLOADS) {
         auto upload_staging = runtime.UploadStagingBuffer(copy_size);
         std::array copies{BufferCopy{
@@ -2128,12 +2155,18 @@ bool BufferCache<P>::HasFastUniformBufferBound(size_t stage, u32 binding_index) 
 template <class P>
 std::pair<typename BufferCache<P>::Buffer*, u32> BufferCache<P>::GetDrawIndirectCount() {
     auto& buffer = slot_buffers[channel_state->count_buffer_binding.buffer_id];
+    if constexpr (requires { buffer.MarkGpuUse(); }) {
+        buffer.MarkGpuUse();
+    }
     return std::make_pair(&buffer, buffer.Offset(channel_state->count_buffer_binding.device_addr));
 }
 
 template <class P>
 std::pair<typename BufferCache<P>::Buffer*, u32> BufferCache<P>::GetDrawIndirectBuffer() {
     auto& buffer = slot_buffers[channel_state->indirect_buffer_binding.buffer_id];
+    if constexpr (requires { buffer.MarkGpuUse(); }) {
+        buffer.MarkGpuUse();
+    }
     return std::make_pair(&buffer,
                           buffer.Offset(channel_state->indirect_buffer_binding.device_addr));
 }

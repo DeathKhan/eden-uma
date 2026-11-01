@@ -83,10 +83,14 @@ vk::Buffer CreateBuffer(const Device& device, const MemoryAllocator& memory_allo
         .queueFamilyIndexCount = 0,
         .pQueueFamilyIndices = nullptr,
     };
+    // UMA: put cache buffers in mapped device-local|host-visible memory so uploads can be
+    // written in place (no staging + GPU copy).
+    const MemoryUsage usage =
+        device.IsUmaFastPath() ? MemoryUsage::Stream : MemoryUsage::DeviceLocal;
     if (sparse_alignment > 1) {
-        return memory_allocator.CreateBuffer(buffer_ci, MemoryUsage::DeviceLocal, sparse_alignment);
+        return memory_allocator.CreateBuffer(buffer_ci, usage, sparse_alignment);
     }
-    return memory_allocator.CreateBuffer(buffer_ci, MemoryUsage::DeviceLocal);
+    return memory_allocator.CreateBuffer(buffer_ci, usage);
 }
 } // Anonymous namespace
 
@@ -122,6 +126,26 @@ Buffer::Buffer(BufferCacheRuntime& runtime, DAddr cpu_addr_, u64 size_bytes_,
 void Buffer::MarkUsage(u64 offset, u64 size) noexcept {
     tracker.Track(offset, size);
     last_usage_tick = scheduler->CurrentTick();
+    gpu_use_tick = last_usage_tick;
+}
+
+void Buffer::MarkGpuUse() noexcept {
+    gpu_use_tick = scheduler->CurrentTick();
+}
+
+std::span<u8> Buffer::DirectWriteSpan() noexcept {
+    if (!device || is_null || !buffer.IsHostVisible() || !buffer.IsHostCoherent() ||
+        !device->IsUmaFastPath()) {
+        return {};
+    }
+    if (!scheduler->IsFree(gpu_use_tick)) {
+        return {};
+    }
+    return buffer.Mapped();
+}
+
+void Buffer::FlushDirectWrite(u64, u64) noexcept {
+    // DirectWriteSpan only hands out host-coherent memory; nothing to flush.
 }
 
 VkBufferView Buffer::View(u32 offset, u32 size, VideoCore::Surface::PixelFormat format) {

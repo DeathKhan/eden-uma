@@ -61,6 +61,14 @@ public:
 
     void MarkUsage(u64 offset, u64 size) noexcept;
 
+    /// Records that GPU work recorded at the current tick may access this buffer.
+    void MarkGpuUse() noexcept;
+
+    /// UMA fast path: mapped span if the buffer is host-visible and idle on the GPU, else empty.
+    [[nodiscard]] std::span<u8> DirectWriteSpan() noexcept;
+
+    void FlushDirectWrite(u64 offset, u64 size) noexcept;
+
     void ResetUsageTracking() noexcept {
         tracker.Reset();
     }
@@ -88,6 +96,7 @@ private:
     VideoCommon::UsageTracker tracker;
     VkDeviceAddress device_address{};
     u64 last_usage_tick{};
+    u64 gpu_use_tick{};
     bool is_null{};
     bool sparse_compatible{};
 };
