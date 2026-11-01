@@ -13,6 +13,9 @@
 #include <vector>
 
 #include "common/alignment.h"
+#ifndef _WIN32
+#include <sys/mman.h>
+#endif
 #include "common/literals.h"
 #include "common/logging.h"
 #include "video_core/buffer_cache/buffer_cache_base.h"
@@ -136,7 +139,8 @@ Buffer::Buffer(BufferCacheRuntime& runtime, DAddr cpu_addr_, u64 size_bytes_,
                bool sparse_compatible_)
     : VideoCommon::BufferBase(cpu_addr_, size_bytes_), device{&runtime.device},
       scheduler{&runtime.scheduler},
-      buffer{runtime.CreateHostAliasBuffer(cpu_addr_, SizeBytes(), sparse_compatible_)},
+      buffer{runtime.CreateHostAliasBuffer(cpu_addr_, SizeBytes(), sparse_compatible_,
+                                           scatter_alias)},
       tracker{SizeBytes()} {
     host_aliased = static_cast<bool>(buffer);
     use_ticks.assign((SizeBytes() >> USE_PAGE_SHIFT) + 1, 0);
@@ -359,6 +363,103 @@ vk::Buffer HostAliasPool::CreateBuffer(u8* ptr, VkBufferCreateInfo ci) {
     };
     return vk::Buffer(handle, logical, device.GetAllocator(), nullptr,
                       std::span<u8>{ptr, static_cast<size_t>(ci.size)}, true, location, dld);
+}
+
+HostAliasPool::ScatterAlias::~ScatterAlias() {
+    if (memory) {
+        dld->vkFreeMemory(device, memory, nullptr);
+    }
+#ifndef _WIN32
+    if (view) {
+        munmap(view, size);
+    }
+#endif
+}
+
+vk::Buffer HostAliasPool::CreateScatteredBuffer(std::span<const u64> page_offsets, int fd,
+                                                VkBufferCreateInfo ci,
+                                                std::shared_ptr<ScatterAlias>& owner) {
+#ifdef _WIN32
+    return {};
+#else
+    static constexpr u64 PAGE = 4096;
+    if (!IsUsable() || import_failed || fd < 0 || page_offsets.empty() ||
+        page_offsets.size() * PAGE != ci.size) {
+        return {};
+    }
+    auto alias = std::make_shared<ScatterAlias>();
+    alias->device = *device.GetLogical();
+    alias->dld = &device.GetDispatchLoader();
+    alias->size = static_cast<size_t>(ci.size);
+    void* const reserved =
+        mmap(nullptr, alias->size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (reserved == MAP_FAILED) {
+        return {};
+    }
+    alias->view = static_cast<u8*>(reserved);
+    // Map each physically contiguous run of the backing file into the view.
+    for (size_t first = 0; first < page_offsets.size();) {
+        size_t last = first + 1;
+        while (last < page_offsets.size() && page_offsets[last] == page_offsets[last - 1] + PAGE) {
+            ++last;
+        }
+        void* const piece = mmap(alias->view + first * PAGE, (last - first) * PAGE,
+                                 PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd,
+                                 static_cast<off_t>(page_offsets[first]));
+        if (piece == MAP_FAILED) {
+            return {}; // alias's destructor unmaps the view
+        }
+        first = last;
+    }
+    const VkMemoryAllocateFlagsInfo flags_info{
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
+        .pNext = nullptr,
+        .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT,
+        .deviceMask = 0,
+    };
+    const VkImportMemoryHostPointerInfoEXT import_info{
+        .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
+        .pNext = device.IsBufferDeviceAddressSupported() ? &flags_info : nullptr,
+        .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+        .pHostPointer = alias->view,
+    };
+    const VkMemoryAllocateInfo allocate_info{
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .pNext = &import_info,
+        .allocationSize = alias->size,
+        .memoryTypeIndex = memory_type,
+    };
+    const auto& dld = *alias->dld;
+    if (dld.vkAllocateMemory(alias->device, &allocate_info, nullptr, &alias->memory) !=
+        VK_SUCCESS) {
+        alias->memory = VK_NULL_HANDLE;
+        return {};
+    }
+    const VkExternalMemoryBufferCreateInfo external_info{
+        .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
+        .pNext = nullptr,
+        .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+    };
+    ci.pNext = &external_info;
+    VkBuffer handle{};
+    if (dld.vkCreateBuffer(alias->device, &ci, nullptr, &handle) != VK_SUCCESS) {
+        return {};
+    }
+    if (dld.vkBindBufferMemory(alias->device, handle, alias->memory, 0) != VK_SUCCESS) {
+        dld.vkDestroyBuffer(alias->device, handle, nullptr);
+        return {};
+    }
+    imported_bytes += alias->size;
+    const vk::MemoryLocation location{
+        .memory = alias->memory,
+        .offset = 0,
+        .memory_type = memory_type,
+    };
+    vk::Buffer result(handle, alias->device, device.GetAllocator(), nullptr,
+                      std::span<u8>{alias->view, alias->size}, true, location, dld);
+    owner = std::move(alias);
+    return result;
+#endif
 }
 
 VkBufferView Buffer::View(u32 offset, u32 size, VideoCore::Surface::PixelFormat format) {
@@ -681,11 +782,12 @@ void BufferCacheRuntime::TickFrame(Common::SlotVector<Buffer>& slot_buffers) noe
                 auto& s = host_alias_stats;
                 LOG_INFO(Render_Vulkan,
                          "PERF uma alias live {} ({} KiB), created {} ({} KiB), imports {} "
-                         "({} MiB), noncontiguous {}, forbidden {}, rejected {}, dealiased {}, "
-                         "host-synced fences {}",
+                         "({} MiB), scattered {}, noncontiguous {}, forbidden {}, rejected {}, "
+                         "dealiased {}, host-synced fences {}",
                          live, live_bytes >> 10, s.buffers, s.bytes >> 10,
                          host_alias_pool->ImportCount(), host_alias_pool->ImportedBytes() >> 20,
-                         s.noncontiguous, s.forbidden, s.rejected, s.dealiased, s.fences);
+                         s.scattered, s.noncontiguous, s.forbidden, s.rejected, s.dealiased,
+                         s.fences);
                 s = {};
             }
             auto take = [](VideoCore::PageCounter c) {
@@ -861,8 +963,9 @@ void BufferCacheRuntime::ForbidHostAlias(DAddr addr, u64 size) {
     ++host_alias_stats.dealiased;
 }
 
-vk::Buffer BufferCacheRuntime::CreateHostAliasBuffer(DAddr addr, u64 size,
-                                                     bool sparse_compatible) {
+vk::Buffer BufferCacheRuntime::CreateHostAliasBuffer(
+    DAddr addr, u64 size, bool sparse_compatible,
+    std::shared_ptr<HostAliasPool::ScatterAlias>& scatter_owner) {
     if (!host_alias_pool || sparse_compatible || addr == 0 || size == 0) {
         return {};
     }
@@ -871,11 +974,6 @@ vk::Buffer BufferCacheRuntime::CreateHostAliasBuffer(DAddr addr, u64 size,
             ++host_alias_stats.forbidden;
             return {};
         }
-    }
-    u8* const ptr = device_memory->GetSpan(addr, size);
-    if (!ptr) {
-        ++host_alias_stats.noncontiguous;
-        return {};
     }
     const VkBufferCreateInfo buffer_ci{
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -887,7 +985,33 @@ vk::Buffer BufferCacheRuntime::CreateHostAliasBuffer(DAddr addr, u64 size,
         .queueFamilyIndexCount = 0,
         .pQueueFamilyIndices = nullptr,
     };
-    vk::Buffer result = host_alias_pool->CreateBuffer(ptr, buffer_ci);
+    vk::Buffer result;
+    if (u8* const ptr = device_memory->GetSpan(addr, size)) {
+        result = host_alias_pool->CreateBuffer(ptr, buffer_ci);
+    } else {
+        // Physically scattered: gather the backing offset of every page and import a private
+        // contiguous view of them.
+        static constexpr u64 MAX_SCATTERED_SIZE = 256_MiB;
+        const u8* const base = device_memory->GetPhysicalBacking().data();
+        bool mapped = (addr % 4096) == 0 && (size % 4096) == 0 && size <= MAX_SCATTERED_SIZE;
+        scatter_pages.clear();
+        for (u64 offset = 0; mapped && offset < size; offset += 4096) {
+            const u8* const page = device_memory->GetPointer<u8>(addr + offset);
+            mapped = page != nullptr;
+            if (mapped) {
+                scatter_pages.push_back(static_cast<u64>(page - base));
+            }
+        }
+        if (mapped) {
+            result = host_alias_pool->CreateScatteredBuffer(
+                scatter_pages, device_memory->GetPhysicalBackingFd(), buffer_ci, scatter_owner);
+        }
+        if (!result) {
+            ++host_alias_stats.noncontiguous;
+            return {};
+        }
+        ++host_alias_stats.scattered;
+    }
     if (!result) {
         ++host_alias_stats.rejected;
         return {};

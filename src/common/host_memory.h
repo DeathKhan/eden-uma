@@ -65,6 +65,9 @@ public:
         return backing_size;
     }
 
+    /// File descriptor of the shared backing memory (POSIX memfd/shm), or -1 if there is none.
+    [[nodiscard]] int BackingFd() const noexcept;
+
     [[nodiscard]] u8* VirtualBasePointer() noexcept {
         return virtual_base;
     }

@@ -517,6 +517,10 @@ public:
         , virtual_size{virtual_size_}
     {}
 
+    int Fd() const noexcept {
+        return fd;
+    }
+
     bool Init() {
         long page_size = sysconf(_SC_PAGESIZE);
         ASSERT_MSG(page_size == 0x1000, "page size {:#x} is incompatible with 4K paging", page_size);
@@ -792,6 +796,14 @@ void HostMemory::Protect(size_t virtual_offset, size_t length, MemoryPermission 
 
 void HostMemory::ClearBackingRegion(size_t physical_offset, size_t length, u32 fill_value) {
     std::memset(backing_base + physical_offset, fill_value, length);
+}
+
+int HostMemory::BackingFd() const noexcept {
+#if defined(_WIN32) || defined(__OPENORBIS__) || defined(__managarm__)
+    return -1;
+#else
+    return impl ? impl->Fd() : -1;
+#endif
 }
 
 void HostMemory::EnableDirectMappedAddress() {

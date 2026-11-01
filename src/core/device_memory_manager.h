@@ -73,6 +73,11 @@ public:
         return {reinterpret_cast<u8*>(physical_base), physical_size};
     }
 
+    /// File descriptor behind GetPhysicalBacking (memfd), -1 if the backing is not a file.
+    [[nodiscard]] int GetPhysicalBackingFd() const noexcept {
+        return physical_fd;
+    }
+
     // Write / Read
     template <typename T>
     T* GetPointer(DAddr address);
@@ -182,6 +187,7 @@ private:
 
     const uintptr_t physical_base;
     const size_t physical_size;
+    const int physical_fd;
     DeviceInterface* device_inter;
 
     struct TrackedEntry {

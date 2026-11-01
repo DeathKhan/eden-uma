@@ -49,6 +49,22 @@ public:
     /// Buffer whose memory is [ptr, ptr + size) of guest RAM; empty if that is not possible.
     [[nodiscard]] vk::Buffer CreateBuffer(u8* ptr, VkBufferCreateInfo ci);
 
+    /// Dedicated import for a buffer whose guest RAM is physically scattered: the pieces are
+    /// mapped back to back into a private view of the backing file (never write-protected, so
+    /// the import can pin it) and imported as one allocation. Keeps the view and the memory
+    /// alive until the buffer is destroyed.
+    struct ScatterAlias {
+        VkDevice device{};
+        const vk::DeviceDispatch* dld{};
+        VkDeviceMemory memory{};
+        u8* view{};
+        size_t size{};
+        ~ScatterAlias();
+    };
+    [[nodiscard]] vk::Buffer CreateScatteredBuffer(std::span<const u64> page_offsets, int fd,
+                                                   VkBufferCreateInfo ci,
+                                                   std::shared_ptr<ScatterAlias>& owner);
+
     [[nodiscard]] bool IsUsable() const noexcept {
         return memory_type != INVALID_TYPE;
     }
@@ -187,6 +203,9 @@ private:
 
     const Device* device{};
     Scheduler* scheduler{};
+    /// Owns the private view + import of a scattered alias; declared before buffer so the
+    /// VkBuffer is destroyed first.
+    std::shared_ptr<HostAliasPool::ScatterAlias> scatter_alias;
     vk::Buffer buffer;
     std::vector<BufferView> views;
     VideoCommon::UsageTracker tracker;
@@ -273,7 +292,9 @@ public:
     void MarkEngineWritten(DAddr addr, u64 size);
     [[nodiscard]] bool IsEngineWritten(DAddr addr, u64 size) const;
     /// Aliased cache buffer for [addr, addr + size), or an empty buffer.
-    [[nodiscard]] vk::Buffer CreateHostAliasBuffer(DAddr addr, u64 size, bool sparse_compatible);
+    [[nodiscard]] vk::Buffer CreateHostAliasBuffer(
+        DAddr addr, u64 size, bool sparse_compatible,
+        std::shared_ptr<HostAliasPool::ScatterAlias>& scatter_owner);
 
     void ClearBuffer(VkBuffer dest_buffer, u32 offset, size_t size, u32 value);
 
@@ -412,11 +433,13 @@ private:
     std::unique_ptr<HostAliasPool> host_alias_pool;
     std::vector<u64> host_alias_forbidden; ///< Bit per 64 KiB device page.
     std::vector<u64> engine_written;       ///< Bit per 4 KiB device page.
+    std::vector<u64> scatter_pages;        ///< Scratch: backing offset per page.
     std::atomic<bool> has_host_aliases{false};
     struct HostAliasStats {
         u64 buffers = 0;
         u64 bytes = 0;
         u64 noncontiguous = 0;
+        u64 scattered = 0;
         u64 forbidden = 0;
         u64 rejected = 0;
         u64 dealiased = 0;
