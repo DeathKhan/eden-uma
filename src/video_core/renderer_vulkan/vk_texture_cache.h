@@ -323,6 +323,9 @@ public:
     void UploadMemory(VkBuffer buffer, VkDeviceSize offset,
                       std::span<const VideoCommon::BufferImageCopy> copies);
 
+    bool TryHostCopyUpload(const StagingBufferRef& map,
+                           std::span<const VideoCommon::BufferImageCopy> copies);
+
     void UploadMemory(const StagingBufferRef& map,
                       std::span<const VideoCommon::BufferImageCopy> copies);
 
@@ -390,6 +393,7 @@ private:
     std::vector<vk::ImageView> storage_image_views;
     VkImageAspectFlags aspect_mask = 0;
     bool initialized = false;
+    bool host_copy_upload = false;
 
     std::optional<Framebuffer> scale_framebuffer;
     std::optional<Framebuffer> normal_framebuffer;

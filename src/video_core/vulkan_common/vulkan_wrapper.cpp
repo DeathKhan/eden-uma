@@ -240,6 +240,8 @@ void Load(VkDevice device, DeviceDispatch& dld) noexcept {
     X(vkUpdateDescriptorSetWithTemplate);
     X(vkUpdateDescriptorSets);
     X(vkGetBufferDeviceAddress);
+    X(vkCopyMemoryToImageEXT);
+    X(vkTransitionImageLayoutEXT);
     X(vkGetDescriptorSetLayoutSizeEXT);
     X(vkGetDescriptorSetLayoutBindingOffsetEXT);
     X(vkGetDescriptorEXT);

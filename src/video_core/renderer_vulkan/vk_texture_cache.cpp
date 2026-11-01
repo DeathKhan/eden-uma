@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include <limits>
 #include <array>
 #include <optional>
@@ -215,6 +216,27 @@ constexpr VkBorderColor ConvertBorderColor(const std::array<float, 4>& color) {
     return image_ci;
 }
 
+// UMA fast path: fresh single-sample BCn/ASTC images get HOST_TRANSFER usage so their first
+// upload can be a direct CPU copy (vkCopyMemoryToImageEXT) instead of a staging copy.
+// Compressed formats are never UBWC on Turnip, so the usage bit costs nothing on the GPU side.
+[[nodiscard]] bool WantsHostImageCopy(const Device& device, const ImageInfo& info,
+                                      size_t view_format_count, VkFormat format) {
+    if (!device.IsUmaHostImageCopyUsable() || !device.GetLogical().HasHostImageCopy()) {
+        return false;
+    }
+    if (info.type == ImageType::Buffer || info.num_samples != 1 || view_format_count > 1) {
+        return false;
+    }
+    if (!IsPixelFormatASTC(info.format) && !IsPixelFormatBCn(info.format)) {
+        return false;
+    }
+    if (IsPixelFormatASTC(info.format) && !device.IsOptimalAstcSupported()) {
+        return false;
+    }
+    const VkFormatProperties3 props = device.GetPhysical().GetFormatProperties3(format);
+    return (props.optimalTilingFeatures & VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT_EXT) != 0;
+}
+
 [[nodiscard]] vk::Image MakeImage(const Device& device, const MemoryAllocator& allocator,
                                   const ImageInfo& info, std::span<const VkFormat> view_formats,
                                   std::optional<VkFormat> format_override = {}) {
@@ -222,6 +244,9 @@ constexpr VkBorderColor ConvertBorderColor(const std::array<float, 4>& color) {
         return vk::Image{};
     }
     VkImageCreateInfo image_ci = MakeImageCreateInfo(device, info, format_override);
+    if (!format_override && WantsHostImageCopy(device, info, view_formats.size(), image_ci.format)) {
+        image_ci.usage |= VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT;
+    }
     const VkImageFormatListCreateInfo image_format_list = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO,
         .pNext = nullptr,
@@ -1885,6 +1910,12 @@ Image::Image(TextureCacheRuntime& runtime_, const ImageInfo& info_, GPUVAddr gpu
       original_image(MakeImage(runtime_.device, runtime_.memory_allocator, info,
                                runtime->ViewFormats(info.format))),
       aspect_mask(ImageAspectMask(info.format)) {
+    if (original_image) {
+        const auto fmt = MaxwellToVK::SurfaceFormat(runtime->device, FormatType::Optimal, false,
+                                                    info.format).format;
+        host_copy_upload = WantsHostImageCopy(runtime->device, info,
+                                              runtime->ViewFormats(info.format).size(), fmt);
+    }
     if (IsPixelFormatASTC(info.format) && !runtime->device.IsOptimalAstcSupported()) {
         switch (Settings::values.accelerate_astc.GetValue()) {
         case Settings::AstcDecodeMode::Gpu:
@@ -2074,7 +2105,78 @@ void Image::UploadMemory(VkBuffer buffer, VkDeviceSize offset,
     }
 }
 
+bool Image::TryHostCopyUpload(const StagingBufferRef& map,
+                              std::span<const BufferImageCopy> copies) {
+    if (!host_copy_upload || initialized || copies.empty() || map.mapped_span.empty() ||
+        True(flags & ImageFlagBits::Rescaled) || True(flags & ImageFlagBits::GpuModified) ||
+        aspect_mask != VK_IMAGE_ASPECT_COLOR_BIT || info.num_samples != 1) {
+        return false;
+    }
+    const vk::Device& dev = runtime->device.GetLogical();
+    const VkImage vk_image = *original_image;
+    const VkHostImageLayoutTransitionInfoEXT transition{
+        .sType = VK_STRUCTURE_TYPE_HOST_IMAGE_LAYOUT_TRANSITION_INFO_EXT,
+        .pNext = nullptr,
+        .image = vk_image,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .subresourceRange{
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = VK_REMAINING_MIP_LEVELS,
+            .baseArrayLayer = 0,
+            .layerCount = VK_REMAINING_ARRAY_LAYERS,
+        },
+    };
+    if (dev.TransitionImageLayoutEXT(transition) != VK_SUCCESS) {
+        return false;
+    }
+    const auto vk_copies = TransformBufferImageCopies(copies, 0, aspect_mask);
+    boost::container::small_vector<VkMemoryToImageCopyEXT, 16> regions;
+    regions.reserve(vk_copies.size());
+    const u8* const base = map.mapped_span.data();
+    const size_t span_size = map.mapped_span.size();
+    for (size_t i = 0; i < vk_copies.size(); ++i) {
+        const auto& c = vk_copies[i];
+        if (copies[i].buffer_offset + copies[i].buffer_size > span_size) {
+            return false; // layout already GENERAL; staged fallback handles UNDEFINED too
+        }
+        regions.push_back(VkMemoryToImageCopyEXT{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_TO_IMAGE_COPY_EXT,
+            .pNext = nullptr,
+            .pHostPointer = base + c.bufferOffset,
+            .memoryRowLength = c.bufferRowLength,
+            .memoryImageHeight = c.bufferImageHeight,
+            .imageSubresource = c.imageSubresource,
+            .imageOffset = c.imageOffset,
+            .imageExtent = c.imageExtent,
+        });
+    }
+    const VkCopyMemoryToImageInfoEXT copy_info{
+        .sType = VK_STRUCTURE_TYPE_COPY_MEMORY_TO_IMAGE_INFO_EXT,
+        .pNext = nullptr,
+        .flags = 0,
+        .dstImage = vk_image,
+        .dstImageLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .regionCount = static_cast<u32>(regions.size()),
+        .pRegions = regions.data(),
+    };
+    if (dev.CopyMemoryToImageEXT(copy_info) != VK_SUCCESS) {
+        return false;
+    }
+    initialized = true;
+    static std::atomic<u64> host_copies{0};
+    const u64 n = ++host_copies;
+    if ((n & 0x3FF) == 1) {
+        LOG_INFO(Render_Vulkan, "PERF uma hostcopy images {}", n);
+    }
+    return true;
+}
+
 void Image::UploadMemory(const StagingBufferRef& map, std::span<const BufferImageCopy> copies) {
+    if (TryHostCopyUpload(map, copies)) {
+        return;
+    }
     UploadMemory(map.buffer, map.offset, copies);
 }
 

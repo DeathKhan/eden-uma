@@ -1522,6 +1522,11 @@ void Device::RemoveUnsuitableExtensions() {
     RemoveExtensionFeatureIfUnsuitable(extensions.maintenance5, features.maintenance5,
                                        VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
 
+    // VK_EXT_host_image_copy (only used on the UMA fast path)
+    extensions.host_image_copy = features.host_image_copy.hostImageCopy;
+    RemoveExtensionFeatureIfUnsuitable(extensions.host_image_copy, features.host_image_copy,
+                                       VK_EXT_HOST_IMAGE_COPY_EXTENSION_NAME);
+
     // VK_KHR_maintenance6
     extensions.maintenance6 = features.maintenance6.maintenance6;
     RemoveExtensionFeatureIfUnsuitable(extensions.maintenance6, features.maintenance6,

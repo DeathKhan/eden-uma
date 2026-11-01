@@ -355,6 +355,8 @@ struct DeviceDispatch : InstanceDispatch {
     PFN_vkUnmapMemory vkUnmapMemory{};
     PFN_vkUpdateDescriptorSetWithTemplate vkUpdateDescriptorSetWithTemplate{};
     PFN_vkGetBufferDeviceAddress vkGetBufferDeviceAddress{};
+    PFN_vkCopyMemoryToImageEXT vkCopyMemoryToImageEXT{};
+    PFN_vkTransitionImageLayoutEXT vkTransitionImageLayoutEXT{};
     PFN_vkGetDescriptorSetLayoutSizeEXT vkGetDescriptorSetLayoutSizeEXT{};
     PFN_vkGetDescriptorSetLayoutBindingOffsetEXT vkGetDescriptorSetLayoutBindingOffsetEXT{};
     PFN_vkGetDescriptorEXT vkGetDescriptorEXT{};
@@ -1114,6 +1116,18 @@ public:
 
     void UpdateDescriptorSets(Span<VkWriteDescriptorSet> writes,
                               Span<VkCopyDescriptorSet> copies) const noexcept;
+
+    [[nodiscard]] bool HasHostImageCopy() const noexcept {
+        return dld->vkCopyMemoryToImageEXT != nullptr && dld->vkTransitionImageLayoutEXT != nullptr;
+    }
+
+    VkResult TransitionImageLayoutEXT(const VkHostImageLayoutTransitionInfoEXT& info) const noexcept {
+        return dld->vkTransitionImageLayoutEXT(handle, 1, &info);
+    }
+
+    VkResult CopyMemoryToImageEXT(const VkCopyMemoryToImageInfoEXT& info) const noexcept {
+        return dld->vkCopyMemoryToImageEXT(handle, &info);
+    }
 
     void UpdateDescriptorSet(VkDescriptorSet set, VkDescriptorUpdateTemplate update_template,
                              const void* data) const noexcept {
