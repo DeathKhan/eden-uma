@@ -45,10 +45,16 @@ differ. Step-by-step A/B measurements are in the commit messages.
 
 ## Installing
 
-1. Install `eden-uma-<version>.apk` from the release.
-2. Copy your keys and firmware as for official Eden.
-3. In Eden UMA open Settings → GPU Driver Manager and install `turnip-uma-<version>.zip` from the release.
-   Host aliasing only turns on with this driver; with other drivers the other UMA paths still apply.
+1. Download `eden-uma-<version>.apk` from the [latest release](../../releases/latest) on your device and
+   install it (allow installs from your browser or file manager when Android asks).
+2. Open Eden UMA, add your keys and firmware, and pick your games folder, as for official Eden.
+3. Play. The Eden UMA Turnip driver is built into the APK: on the first launch on an Adreno 810, 812,
+   825, 829, 830 or 840 it is installed and selected automatically (it shows up in Settings → GPU Driver
+   Manager as `turnip-uma`). On other GPUs the app uses your system driver; host aliasing then stays
+   off, but the other UMA paths still apply.
+
+If you had already picked another driver in Eden UMA, it is left alone; select `turnip-uma` in the GPU
+Driver Manager to switch. The same driver is attached to the release as a zip for other apps.
 
 ## Settings
 

@@ -19,6 +19,7 @@ import javax.net.ssl.X509TrustManager
 import android.content.res.Configuration
 import android.os.LocaleList
 import org.yuzu.yuzu_emu.features.settings.model.IntSetting
+import org.yuzu.yuzu_emu.utils.BundledDriver
 import org.yuzu.yuzu_emu.utils.DirectoryInitialization
 import org.yuzu.yuzu_emu.utils.DocumentsTree
 import org.yuzu.yuzu_emu.utils.GpuDriverHelper
@@ -69,6 +70,7 @@ class YuzuApplication : Application() {
 
         NativeLibrary.playTimeManagerInit()
         GpuDriverHelper.initializeDriverParameters()
+        BundledDriver.install()
         NativeInput.reloadInputDevices()
         NativeLibrary.logDeviceInfo()
         PowerStateUpdater.start()

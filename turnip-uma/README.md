@@ -20,4 +20,5 @@ NDK=/path/to/android-ndk ./../eden-uma/turnip-uma/build.sh "$PWD" turnip-uma
 ```
 
 `build.sh` needs the Android NDK, meson, ninja and Python with mako. The result is
-`build-android/turnip-uma.zip`, installable from Eden's GPU Driver Manager.
+`build-android/turnip-uma.zip`. The APK bundles it as `src/android/app/src/main/assets/eden-uma/turnip-uma.zip`;
+replace that file to ship a rebuilt driver. It can also be installed by hand from the GPU Driver Manager.
