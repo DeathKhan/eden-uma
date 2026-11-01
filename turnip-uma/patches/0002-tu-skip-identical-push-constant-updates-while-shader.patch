@@ -1,0 +1,37 @@
+From 9705b5d65c7b99dafac50972774477ea0b122842 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 31 Oct 2026 10:53:58 -0500
+Subject: [PATCH 2/4] tu: skip identical push constant updates while shader
+ constants are clean (Codex patch)
+
+Applies codex/turnip-constants (turnip-constants.patch, sha256 6d376aef...):
+an identical incoming push constant range does not re-dirty shader constants
+when they are already clean; pipeline/helper dirty events still force rebuilds.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/freedreno/vulkan/tu_cmd_buffer.cc | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/src/freedreno/vulkan/tu_cmd_buffer.cc b/src/freedreno/vulkan/tu_cmd_buffer.cc
+index 682f2a3efa7..7b69aa4b2ac 100644
+--- a/src/freedreno/vulkan/tu_cmd_buffer.cc
++++ b/src/freedreno/vulkan/tu_cmd_buffer.cc
+@@ -5436,8 +5436,12 @@ tu_CmdPushConstants2KHR(VkCommandBuffer commandBuffer,
+                         const VkPushConstantsInfoKHR *pPushConstantsInfo)
+ {
+    VK_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
+-   memcpy((char *) cmd->push_constants + pPushConstantsInfo->offset,
+-          pPushConstantsInfo->pValues, pPushConstantsInfo->size);
++   void *dst = (char *) cmd->push_constants + pPushConstantsInfo->offset;
++   if (!(cmd->state.dirty & TU_CMD_DIRTY_SHADER_CONSTS) &&
++       memcmp(dst, pPushConstantsInfo->pValues, pPushConstantsInfo->size) == 0)
++      return;
++
++   memcpy(dst, pPushConstantsInfo->pValues, pPushConstantsInfo->size);
+    cmd->state.dirty |= TU_CMD_DIRTY_SHADER_CONSTS;
+ }
+ 
+-- 
+2.56.0
+

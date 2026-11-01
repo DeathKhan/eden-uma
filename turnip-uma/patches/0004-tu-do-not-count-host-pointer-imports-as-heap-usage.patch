@@ -1,0 +1,42 @@
+From b2e046d91308bf8649c77dd8f8cc54424f853430 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 1 Nov 2026 10:48:31 -0600
+Subject: [PATCH 4/4] tu: do not count host-pointer imports as heap usage
+
+Memory imported with VK_EXT_external_memory_host belongs to the application. Counting it
+in heap.used made VK_EXT_memory_budget report it as GPU usage, so an emulator that imports
+guest RAM saw its caches as over budget and evicted textures.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/freedreno/vulkan/tu_device.cc | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/src/freedreno/vulkan/tu_device.cc b/src/freedreno/vulkan/tu_device.cc
+index e69749f0d39..5b81dc6f7ca 100644
+--- a/src/freedreno/vulkan/tu_device.cc
++++ b/src/freedreno/vulkan/tu_device.cc
+@@ -3679,7 +3679,8 @@ _tu_destroy_memory(struct tu_device *device,
+                   struct tu_device_memory *mem)
+ {
+    if (mem->bo) {
+-      p_atomic_add(&device->physical_device->heap.used, -mem->bo->size);
++      if (!mem->bo->host_ptr)
++         p_atomic_add(&device->physical_device->heap.used, -mem->bo->size);
+       tu_bo_finish(device, mem->bo);
+    }
+ 
+@@ -3860,7 +3861,9 @@ tu_AllocateMemory(VkDevice _device,
+    }
+ 
+    if (result == VK_SUCCESS && !mem->lazy) {
+-      result = tu_add_to_heap(device, mem->bo);
++      /* Imported host memory belongs to the application; it is not GPU heap usage. */
++      if (!mem->bo->host_ptr)
++         result = tu_add_to_heap(device, mem->bo);
+       mem->iova = mem->bo->iova;
+    }
+ 
+-- 
+2.56.0
+

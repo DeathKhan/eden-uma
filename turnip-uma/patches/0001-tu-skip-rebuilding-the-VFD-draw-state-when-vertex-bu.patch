@@ -1,0 +1,76 @@
+From e1b7f1562684c8f1cb84c4c5bacf121c55806743 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 31 Oct 2026 07:53:17 -0500
+Subject: [PATCH 1/4] tu: skip rebuilding the VFD draw state when vertex
+ buffers are unchanged
+
+tu_CmdBindVertexBuffers2 allocated a new sub-stream and re-emitted every
+bound vertex buffer on each call. Emulators rebind identical buffers around
+most draws, which made tu_cs_begin_sub_stream_aligned the hottest Turnip
+function in Eden. Compare the new bases and sizes first and return early
+when nothing changed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/freedreno/vulkan/tu_cmd_buffer.cc | 33 ++++++++++++++++++---------
+ 1 file changed, 22 insertions(+), 11 deletions(-)
+
+diff --git a/src/freedreno/vulkan/tu_cmd_buffer.cc b/src/freedreno/vulkan/tu_cmd_buffer.cc
+index 01f0aa65957..682f2a3efa7 100644
+--- a/src/freedreno/vulkan/tu_cmd_buffer.cc
++++ b/src/freedreno/vulkan/tu_cmd_buffer.cc
+@@ -4681,6 +4681,7 @@ tu_CmdBindVertexBuffers2(VkCommandBuffer commandBuffer,
+    VK_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
+    struct tu_cs cs;
+ 
++   const uint32_t old_max_vbs_bound = cmd->state.max_vbs_bound;
+    cmd->state.max_vbs_bound = MAX2(
+       cmd->state.max_vbs_bound, firstBinding + bindingCount);
+ 
+@@ -4689,22 +4690,32 @@ tu_CmdBindVertexBuffers2(VkCommandBuffer commandBuffer,
+                                         pStrides);
+    }
+ 
+-   cmd->state.vertex_buffers.size = 4 * cmd->state.max_vbs_bound;
+-   cmd->state.vertex_buffers.iova =
+-      tu_cs_draw_state(&cmd->sub_cs, &cs, cmd->state.vertex_buffers.size).iova;
+-
++   /* Emulators rebind the same vertex buffers around most draws. Only build
++    * a new VFD draw state when a base or size actually changes, instead of
++    * allocating a sub-stream and re-emitting every bound buffer each time.
++    */
++   bool changed = cmd->state.max_vbs_bound != old_max_vbs_bound ||
++                  !cmd->state.vertex_buffers.iova;
+    for (uint32_t i = 0; i < bindingCount; i++) {
+-      if (pBuffers[i] == VK_NULL_HANDLE) {
+-         cmd->state.vb[firstBinding + i].base = 0;
+-         cmd->state.vb[firstBinding + i].size = 0;
+-      } else {
++      uint64_t base = 0, size = 0;
++      if (pBuffers[i] != VK_NULL_HANDLE) {
+          struct tu_buffer *buf = tu_buffer_from_handle(pBuffers[i]);
+-         cmd->state.vb[firstBinding + i].base = vk_buffer_address(&buf->vk, pOffsets[i]);
+-         cmd->state.vb[firstBinding + i].size =
+-            vk_buffer_range(&buf->vk, pOffsets[i], pSizes ? pSizes[i] : VK_WHOLE_SIZE);
++         base = vk_buffer_address(&buf->vk, pOffsets[i]);
++         size = vk_buffer_range(&buf->vk, pOffsets[i], pSizes ? pSizes[i] : VK_WHOLE_SIZE);
+       }
++      changed |= cmd->state.vb[firstBinding + i].base != base ||
++                 cmd->state.vb[firstBinding + i].size != size;
++      cmd->state.vb[firstBinding + i].base = base;
++      cmd->state.vb[firstBinding + i].size = size;
+    }
+ 
++   if (!changed)
++      return;
++
++   cmd->state.vertex_buffers.size = 4 * cmd->state.max_vbs_bound;
++   cmd->state.vertex_buffers.iova =
++      tu_cs_draw_state(&cmd->sub_cs, &cs, cmd->state.vertex_buffers.size).iova;
++
+    for (uint32_t i = 0; i < cmd->state.max_vbs_bound; i++) {
+       tu_cs_emit_regs(&cs,
+                       A6XX_VFD_VERTEX_BUFFER_BASE(i, .qword = cmd->state.vb[i].base),
+-- 
+2.56.0
+

@@ -15,6 +15,14 @@
   <br>
 </h1>
 
+> [!NOTE]
+> **This is Eden UMA**, an unofficial performance fork for Android handhelds with Adreno 8xx GPUs
+> (AYN Odin 3 and similar). It lets the GPU use the emulated Switch RAM directly instead of copying it.
+> See **[UMA.md](UMA.md)** for results, installation and the bundled Turnip driver, and report bugs
+> here rather than to the Eden team.
+>
+> <a href="https://ko-fi.com/jamesfo"><img src="https://img.shields.io/badge/Ko--fi-support-FF5E5B?logo=ko-fi&logoColor=white" alt="Ko-fi"></a>
+
 <h4 align="center"><b>Eden</b> is a free and open-source (FOSS) Switch 1 emulator started by developer Camille LaVey.
 <br>
 Written in C++, with builds for Windows, Linux, macOS, Android, FreeBSD and more.
