@@ -774,6 +774,33 @@ void BufferCache<P>::BindHostIndexBuffer() {
     const u32 offset = buffer.Offset(channel_state->index_buffer.device_addr);
     const u32 size = channel_state->index_buffer.size;
     const auto& draw_state = maxwell3d->draw_manager.draw_state;
+    if constexpr (requires {
+                      runtime.BindQuadIndicesFromHost(draw_state.topology,
+                                                      draw_state.index_buffer.format, 0U, 0U,
+                                                      std::span<const u8>{});
+                  }) {
+        // UMA: quads need a triangle-list index buffer. Build it on the CPU straight into
+        // stream memory from guest RAM (or the inline indices) instead of a compute pass that
+        // ends the render pass, as long as the GPU has not written the source indices.
+        if (draw_state.topology == Maxwell::PrimitiveTopology::Quads ||
+            draw_state.topology == Maxwell::PrimitiveTopology::QuadStrip) {
+            const DAddr index_addr = channel_state->index_buffer.device_addr;
+            std::span<const u8> source;
+            if (!draw_state.inline_index_draw_indexes.empty()) {
+                source = std::span<const u8>(draw_state.inline_index_draw_indexes.data(), size);
+            } else if (index_addr != 0 && !IsRegionGpuModified(index_addr, size)) {
+                if (const u8* const host = device_memory.GetSpan(index_addr, size)) {
+                    source = std::span<const u8>(host, size);
+                }
+            }
+            if (!source.empty() &&
+                runtime.BindQuadIndicesFromHost(draw_state.topology, draw_state.index_buffer.format,
+                                                draw_state.index_buffer.first,
+                                                draw_state.index_buffer.count, source)) {
+                return;
+            }
+        }
+    }
     if (draw_state.inline_index_draw_indexes.empty()) {
         SynchronizeBuffer(buffer, channel_state->index_buffer.device_addr, size);
     } else {

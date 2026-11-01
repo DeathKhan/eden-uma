@@ -265,6 +265,11 @@ public:
 
     void BindQuadIndexBuffer(PrimitiveTopology topology, u32 first, u32 count);
 
+    /// UMA: converts quad / quad-strip indices to a triangle list on the CPU (same result as
+    /// QuadIndexedPass) into stream memory and binds it. False when not applicable.
+    bool BindQuadIndicesFromHost(PrimitiveTopology topology, IndexFormat index_format,
+                                 u32 base_vertex, u32 num_indices, std::span<const u8> source);
+
     void BindVertexBuffer(u32 index, VkBuffer buffer, u32 offset, u32 size, u32 stride);
 
     void BindVertexBuffers(VideoCommon::HostBindings<Buffer>& bindings);

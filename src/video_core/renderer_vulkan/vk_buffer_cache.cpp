@@ -968,6 +968,72 @@ void BufferCacheRuntime::BindIndexBuffer(PrimitiveTopology topology, IndexFormat
     });
 }
 
+namespace {
+template <typename T, bool strip>
+void ConvertQuadIndices(const u8* source, u32* out, u32 primitives, u32 base_vertex) {
+    static constexpr std::array<u32, 6> QUADS{0, 1, 2, 0, 2, 3};
+    static constexpr std::array<u32, 6> QUAD_STRIP{0, 3, 1, 0, 2, 3};
+    for (u32 primitive = 0; primitive < primitives; ++primitive) {
+        const u32 first = strip ? primitive * 2 : primitive * 4;
+        for (u32 vertex = 0; vertex < 6; ++vertex) {
+            T index;
+            std::memcpy(&index, source + (first + (strip ? QUAD_STRIP : QUADS)[vertex]) * sizeof(T),
+                        sizeof(T));
+            *out++ = static_cast<u32>(index) + base_vertex;
+        }
+    }
+}
+
+template <typename T>
+void ConvertQuadIndices(const u8* source, u32* out, u32 primitives, u32 base_vertex,
+                        bool strip) {
+    if (strip) {
+        ConvertQuadIndices<T, true>(source, out, primitives, base_vertex);
+    } else {
+        ConvertQuadIndices<T, false>(source, out, primitives, base_vertex);
+    }
+}
+} // Anonymous namespace
+
+bool BufferCacheRuntime::BindQuadIndicesFromHost(PrimitiveTopology topology,
+                                                 IndexFormat index_format, u32 base_vertex,
+                                                 u32 num_indices, std::span<const u8> source) {
+    // Above this the compute pass is cheaper than the CPU loop.
+    static constexpr u32 MAX_HOST_QUAD_INDICES = 256 * 1024;
+    if (!device.IsUmaZeroCopy() || num_indices < 4 || num_indices > MAX_HOST_QUAD_INDICES) {
+        return false;
+    }
+    const bool strip = topology == PrimitiveTopology::QuadStrip;
+    const u32 index_size = index_format == IndexFormat::UnsignedByte    ? 1
+                           : index_format == IndexFormat::UnsignedShort ? 2
+                                                                        : 4;
+    if (source.size() < static_cast<size_t>(num_indices) * index_size) {
+        return false;
+    }
+    const u32 primitives = strip ? (num_indices - 2) / 2 : num_indices / 4;
+    if (primitives == 0) {
+        return false;
+    }
+    const auto out = staging_pool.Request(static_cast<size_t>(primitives) * 6 * sizeof(u32),
+                                          MemoryUsage::Upload);
+    u32* const dst = reinterpret_cast<u32*>(out.mapped_span.data());
+    switch (index_size) {
+    case 1:
+        ConvertQuadIndices<u8>(source.data(), dst, primitives, base_vertex, strip);
+        break;
+    case 2:
+        ConvertQuadIndices<u16>(source.data(), dst, primitives, base_vertex, strip);
+        break;
+    default:
+        ConvertQuadIndices<u32>(source.data(), dst, primitives, base_vertex, strip);
+        break;
+    }
+    scheduler.Record([buffer = out.buffer, offset = out.offset](vk::CommandBuffer cmdbuf) {
+        cmdbuf.BindIndexBuffer(buffer, offset, VK_INDEX_TYPE_UINT32);
+    });
+    return true;
+}
+
 void BufferCacheRuntime::BindQuadIndexBuffer(PrimitiveTopology topology, u32 first, u32 count) {
     if (count == 0) {
         ReserveNullBuffer();
