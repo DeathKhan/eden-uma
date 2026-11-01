@@ -300,8 +300,8 @@ std::pair<typename P::Buffer*, u32> BufferCache<P>::ObtainCPUBuffer(
     DAddr device_addr, u32 size, ObtainBufferSynchronize sync_info, ObtainBufferOperation post_op) {
     const BufferId buffer_id = FindBuffer(device_addr, size, false);
     Buffer& buffer = slot_buffers[buffer_id];
-    if constexpr (requires { buffer.MarkGpuUse(); }) {
-        buffer.MarkGpuUse();
+    if constexpr (requires { buffer.MarkUntrackedGpuUse(); }) {
+        buffer.MarkUntrackedGpuUse();
     }
 
     // synchronize op
@@ -755,7 +755,13 @@ void BufferCache<P>::BindHostIndexBuffer() {
     if (draw_state.inline_index_draw_indexes.empty()) {
         SynchronizeBuffer(buffer, channel_state->index_buffer.device_addr, size);
     } else {
-        if constexpr (USE_MEMORY_MAPS_FOR_UPLOADS) {
+        std::span<u8> direct;
+        if constexpr (requires { buffer.DirectWriteRange(0, 0); }) {
+            direct = buffer.DirectWriteRange(0, size);
+        }
+        if (!direct.empty()) {
+            std::memcpy(direct.data(), draw_state.inline_index_draw_indexes.data(), size);
+        } else if constexpr (USE_MEMORY_MAPS_FOR_UPLOADS) {
             auto upload_staging = runtime.UploadStagingBuffer(size);
             std::array<BufferCopy, 1> copies{{BufferCopy{.src_offset = upload_staging.offset, .dst_offset = 0, .size = size}}};
             std::memcpy(upload_staging.mapped_span.data(), draw_state.inline_index_draw_indexes.data(), size);
@@ -763,6 +769,7 @@ void BufferCache<P>::BindHostIndexBuffer() {
         } else {
             buffer.ImmediateUpload(0, draw_state.inline_index_draw_indexes);
         }
+        buffer.MarkUsage(0, size);
     }
     if constexpr (HAS_FULL_INDEX_AND_PRIMITIVE_SUPPORT) {
         const u32 new_offset = offset + draw_state.index_buffer.first * u32(draw_state.index_buffer.FormatSizeInBytes());
@@ -1845,9 +1852,13 @@ void BufferCache<P>::MappedUploadMemory([[maybe_unused]] Buffer& buffer,
                                         [[maybe_unused]] u64 total_size_bytes,
                                         [[maybe_unused]] std::span<BufferCopy> copies) {
     if constexpr (USE_MEMORY_MAPS) {
-        if constexpr (requires { buffer.DirectWriteSpan(); }) {
-            // UMA zero-copy: buffer idle on the GPU -> write guest memory straight into it.
-            const std::span<u8> direct = buffer.DirectWriteSpan();
+        if constexpr (requires { buffer.DirectWriteRange(0, 0); }) {
+            // UMA zero-copy: no pending GPU access to the written ranges (the condition that
+            // lets an upload be reordered to the start of the tick) -> write in place.
+            std::span<u8> direct = buffer.DirectWriteRange(copies[0].dst_offset, copies[0].size);
+            for (size_t i = 1; i < copies.size() && !direct.empty(); ++i) {
+                direct = buffer.DirectWriteRange(copies[i].dst_offset, copies[i].size);
+            }
             if (!direct.empty()) {
                 for (const BufferCopy& copy : copies) {
                     device_memory.ReadBlockUnsafe(buffer.CpuAddr() + copy.dst_offset,
@@ -1868,6 +1879,12 @@ void BufferCache<P>::MappedUploadMemory([[maybe_unused]] Buffer& buffer,
         }
         const bool can_reorder = runtime.CanReorderUpload(buffer, copies);
         runtime.CopyBuffer(buffer, upload_staging.buffer, copies, true, can_reorder);
+        if constexpr (requires { buffer.DirectWriteRange(0, 0); }) {
+            // A pending GPU copy now targets these ranges: keep later direct writes off them.
+            for (const BufferCopy& copy : copies) {
+                buffer.MarkUsage(copy.dst_offset, copy.size);
+            }
+        }
     }
 }
 
@@ -1899,10 +1916,10 @@ void BufferCache<P>::InlineMemoryImplementation(DAddr dest_address, size_t copy_
     auto& buffer = slot_buffers[buffer_id];
     SynchronizeBuffer(buffer, dest_address, static_cast<u32>(copy_size));
 
-    if constexpr (requires { buffer.DirectWriteSpan(); }) {
-        const std::span<u8> direct = buffer.DirectWriteSpan();
+    if constexpr (requires { buffer.DirectWriteRange(0, 0); }) {
+        const u64 dst = buffer.Offset(dest_address);
+        const std::span<u8> direct = buffer.DirectWriteRange(dst, copy_size);
         if (!direct.empty()) {
-            const u64 dst = buffer.Offset(dest_address);
             std::memcpy(direct.data() + dst, inlined_buffer.data(), copy_size);
             buffer.FlushDirectWrite(dst, copy_size);
             return;
@@ -1919,6 +1936,12 @@ void BufferCache<P>::InlineMemoryImplementation(DAddr dest_address, size_t copy_
         std::memcpy(src_pointer, inlined_buffer.data(), copy_size);
         const bool can_reorder = runtime.CanReorderUpload(buffer, copies);
         runtime.CopyBuffer(buffer, upload_staging.buffer, copies, true, can_reorder);
+        if constexpr (requires { buffer.DirectWriteRange(0, 0); }) {
+            // A pending GPU copy now targets these ranges: keep later direct writes off them.
+            for (const BufferCopy& copy : copies) {
+                buffer.MarkUsage(copy.dst_offset, copy.size);
+            }
+        }
     } else {
         buffer.ImmediateUpload(buffer.Offset(dest_address), inlined_buffer.first(copy_size));
     }
@@ -2155,8 +2178,8 @@ bool BufferCache<P>::HasFastUniformBufferBound(size_t stage, u32 binding_index) 
 template <class P>
 std::pair<typename BufferCache<P>::Buffer*, u32> BufferCache<P>::GetDrawIndirectCount() {
     auto& buffer = slot_buffers[channel_state->count_buffer_binding.buffer_id];
-    if constexpr (requires { buffer.MarkGpuUse(); }) {
-        buffer.MarkGpuUse();
+    if constexpr (requires { buffer.MarkUntrackedGpuUse(); }) {
+        buffer.MarkUntrackedGpuUse();
     }
     return std::make_pair(&buffer, buffer.Offset(channel_state->count_buffer_binding.device_addr));
 }
@@ -2164,8 +2187,8 @@ std::pair<typename BufferCache<P>::Buffer*, u32> BufferCache<P>::GetDrawIndirect
 template <class P>
 std::pair<typename BufferCache<P>::Buffer*, u32> BufferCache<P>::GetDrawIndirectBuffer() {
     auto& buffer = slot_buffers[channel_state->indirect_buffer_binding.buffer_id];
-    if constexpr (requires { buffer.MarkGpuUse(); }) {
-        buffer.MarkGpuUse();
+    if constexpr (requires { buffer.MarkUntrackedGpuUse(); }) {
+        buffer.MarkUntrackedGpuUse();
     }
     return std::make_pair(&buffer,
                           buffer.Offset(channel_state->indirect_buffer_binding.device_addr));

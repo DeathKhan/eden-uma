@@ -1,3 +1,4 @@
+#include <atomic>
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -139,6 +140,27 @@ std::span<u8> Buffer::DirectWriteSpan() noexcept {
         return {};
     }
     if (!scheduler->IsFree(gpu_use_tick)) {
+        return {};
+    }
+    return buffer.Mapped();
+}
+
+void Buffer::MarkUntrackedGpuUse() noexcept {
+    untracked_use_tick = scheduler->CurrentTick();
+    gpu_use_tick = untracked_use_tick;
+}
+
+namespace {
+std::atomic<u64> uma_direct_bytes{0}, uma_staged_bytes{0}, uma_direct_calls{0}, uma_staged_calls{0};
+}
+
+std::span<u8> Buffer::DirectWriteRange(u64 offset, u64 size) noexcept {
+    const bool ok = device && !is_null && buffer.IsHostVisible() && buffer.IsHostCoherent() &&
+                    device->IsUmaFastPath() && scheduler->IsFree(untracked_use_tick) &&
+                    !tracker.IsUsed(offset, size);
+    (ok ? uma_direct_bytes : uma_staged_bytes).fetch_add(size, std::memory_order_relaxed);
+    (ok ? uma_direct_calls : uma_staged_calls).fetch_add(1, std::memory_order_relaxed);
+    if (!ok) {
         return {};
     }
     return buffer.Mapped();
@@ -435,6 +457,15 @@ u32 BufferCacheRuntime::GetStorageBufferAlignment() const {
 }
 
 void BufferCacheRuntime::TickFrame(Common::SlotVector<Buffer>& slot_buffers) noexcept {
+    if (device.IsUmaFastPath()) {
+        static u32 frames = 0;
+        if (++frames == 600) {
+            frames = 0;
+            LOG_INFO(Render_Vulkan, "PERF uma direct {} calls {} KiB, staged {} calls {} KiB",
+                     uma_direct_calls.exchange(0), uma_direct_bytes.exchange(0) >> 10,
+                     uma_staged_calls.exchange(0), uma_staged_bytes.exchange(0) >> 10);
+        }
+    }
     for (auto it = slot_buffers.begin(); it != slot_buffers.end(); it++) {
         if (scheduler.IsFree(it->LastUsageTick())) {
             it->ResetUsageTracking();
