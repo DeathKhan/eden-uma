@@ -142,23 +142,39 @@ void SleepThread(Core::System& system, s64 ns) {
         // host core briefly. The idle ends early on PhysicalCore::Interrupt(), which is how
         // rescheduling reaches this core, so newly runnable threads only pay host wake latency.
         // Not used in single-core mode, where one host thread runs every emulated core.
-        constexpr u32 IdleYieldBurst = 32;
-        constexpr s64 IdleYieldGapNs = 50'000;
+        // The idle starts at 50 us and doubles (up to 200 us) while the no-op streak continues, so
+        // a long poll costs a few SVCs per idle instead of a burst of 32; anything scheduled resets
+        // it, and PhysicalCore::Interrupt() still ends an idle early.
+        constexpr u32 IdleYieldBurst = 8;
+        constexpr s64 IdleYieldGapNs = 250'000;
+        constexpr u32 IdleMinUs = 50;
+        constexpr u32 IdleMaxUs = 200;
         auto& thread = GetCurrentThread(kernel);
         if (kernel.IsMulticore() &&
             thread.GetYieldScheduleCount() == GetCurrentProcess(kernel).GetScheduledCount()) {
-            const s64 now = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                std::chrono::steady_clock::now().time_since_epoch())
-                                .count();
-            thread.m_idle_yield_count =
-                now - thread.m_last_idle_yield_ns < IdleYieldGapNs ? thread.m_idle_yield_count + 1 : 0;
+            const auto now_ns = [] {
+                return std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           std::chrono::steady_clock::now().time_since_epoch())
+                    .count();
+            };
+            const s64 now = now_ns();
+            const bool streak = now - thread.m_last_idle_yield_ns < IdleYieldGapNs;
+            thread.m_idle_yield_count = streak ? thread.m_idle_yield_count + 1 : 0;
+            if (!streak) {
+                thread.m_idle_yield_us = IdleMinUs;
+            }
             thread.m_last_idle_yield_ns = now;
             if (thread.m_idle_yield_count >= IdleYieldBurst) {
                 thread.m_idle_yield_count = 0;
-                kernel.CurrentPhysicalCore().IdleFor(std::chrono::microseconds(50));
+                kernel.CurrentPhysicalCore().IdleFor(
+                    std::chrono::microseconds(thread.m_idle_yield_us));
+                thread.m_idle_yield_us = (std::min)(thread.m_idle_yield_us * 2, IdleMaxUs);
+                // Measure the next gap from the end of the idle, so the idle keeps the streak.
+                thread.m_last_idle_yield_ns = now_ns();
             }
         } else {
             thread.m_idle_yield_count = 0;
+            thread.m_idle_yield_us = IdleMinUs;
         }
         if (yield_type == Svc::YieldType::WithoutCoreMigration) {
             KScheduler::YieldWithoutCoreMigration(kernel);

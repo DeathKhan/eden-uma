@@ -892,6 +892,7 @@ public:
     // Host-side backoff for guest threads spinning on yields that have nothing to yield to.
     u32 m_idle_yield_count{};
     s64 m_last_idle_yield_ns{};
+    u32 m_idle_yield_us{50};
 private:
     s64 m_last_scheduled_tick{};
     std::array<QueueEntry, Core::Hardware::NUM_CPU_CORES> m_per_core_priority_queue_entry{};
