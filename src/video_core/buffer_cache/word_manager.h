@@ -293,6 +293,10 @@ struct WordManager {
             return;
         // One locked batch for all runs; no copy/sort/coalesce needed (see RangeList).
         tracker->UpdatePagesCachedSortedBatch(std::span<const std::pair<DAddr, size_t>>(ranges.data(), ranges.size()), delta);
+        VideoCore::CountPage(VideoCore::PageCounter::BufferProtect, ranges.size());
+        for (const auto& range : ranges) {
+            VideoCore::CountPage(VideoCore::PageCounter::BufferProtectKiB, range.second >> 10);
+        }
         ranges.clear();
     }
 

@@ -53,6 +53,7 @@ public:
     /// mapped back to back into a private view of the backing file (never write-protected, so
     /// the import can pin it) and imported as one allocation. Keeps the view and the memory
     /// alive until the buffer is destroyed.
+    static constexpr u64 PLACEHOLDER_PAGE = ~u64{0};
     struct ScatterAlias {
         VkDevice device{};
         const vk::DeviceDispatch* dld{};

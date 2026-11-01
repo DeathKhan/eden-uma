@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <bit>
 #include <array>
+#include <cerrno>
 #include <cstring>
 #include <span>
 #include <vector>
@@ -400,13 +401,20 @@ vk::Buffer HostAliasPool::CreateScatteredBuffer(std::span<const u64> page_offset
     // Map each physically contiguous run of the backing file into the view.
     for (size_t first = 0; first < page_offsets.size();) {
         size_t last = first + 1;
-        while (last < page_offsets.size() && page_offsets[last] == page_offsets[last - 1] + PAGE) {
+        const bool placeholder = page_offsets[first] == PLACEHOLDER_PAGE;
+        while (last < page_offsets.size() &&
+               (placeholder ? page_offsets[last] == PLACEHOLDER_PAGE
+                            : page_offsets[last] == page_offsets[last - 1] + PAGE)) {
             ++last;
         }
-        void* const piece = mmap(alias->view + first * PAGE, (last - first) * PAGE,
-                                 PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd,
-                                 static_cast<off_t>(page_offsets[first]));
+        void* const piece =
+            placeholder
+                ? mmap(alias->view + first * PAGE, (last - first) * PAGE, PROT_READ | PROT_WRITE,
+                       MAP_SHARED | MAP_ANONYMOUS | MAP_FIXED, -1, 0)
+                : mmap(alias->view + first * PAGE, (last - first) * PAGE, PROT_READ | PROT_WRITE,
+                       MAP_SHARED | MAP_FIXED, fd, static_cast<off_t>(page_offsets[first]));
         if (piece == MAP_FAILED) {
+            LOG_INFO(Render_Vulkan, "UMA host alias: view mmap failed: {}", strerror(errno));
             return {}; // alias's destructor unmaps the view
         }
         first = last;
@@ -430,8 +438,11 @@ vk::Buffer HostAliasPool::CreateScatteredBuffer(std::span<const u64> page_offset
         .memoryTypeIndex = memory_type,
     };
     const auto& dld = *alias->dld;
-    if (dld.vkAllocateMemory(alias->device, &allocate_info, nullptr, &alias->memory) !=
-        VK_SUCCESS) {
+    if (const VkResult r =
+            dld.vkAllocateMemory(alias->device, &allocate_info, nullptr, &alias->memory);
+        r != VK_SUCCESS) {
+        LOG_INFO(Render_Vulkan, "UMA host alias: scattered import of {} KiB failed ({})",
+                 alias->size >> 10, static_cast<int>(r));
         alias->memory = VK_NULL_HANDLE;
         return {};
     }
@@ -993,21 +1004,30 @@ vk::Buffer BufferCacheRuntime::CreateHostAliasBuffer(
         // contiguous view of them.
         static constexpr u64 MAX_SCATTERED_SIZE = 256_MiB;
         const u8* const base = device_memory->GetPhysicalBacking().data();
+        // Cache buffers are 64 KiB aligned, so their head or tail often covers device pages the
+        // guest never mapped; those get placeholder pages (a later Map marks the alias stale).
         bool mapped = (addr % 4096) == 0 && (size % 4096) == 0 && size <= MAX_SCATTERED_SIZE;
+        bool any_mapped = false;
         scatter_pages.clear();
         for (u64 offset = 0; mapped && offset < size; offset += 4096) {
             const u8* const page = device_memory->GetPointer<u8>(addr + offset);
-            mapped = page != nullptr;
-            if (mapped) {
-                scatter_pages.push_back(static_cast<u64>(page - base));
-            }
+            scatter_pages.push_back(page ? static_cast<u64>(page - base)
+                                         : HostAliasPool::PLACEHOLDER_PAGE);
+            any_mapped |= page != nullptr;
         }
+        mapped = mapped && any_mapped;
         if (mapped) {
             result = host_alias_pool->CreateScatteredBuffer(
                 scatter_pages, device_memory->GetPhysicalBackingFd(), buffer_ci, scatter_owner);
         }
         if (!result) {
             ++host_alias_stats.noncontiguous;
+            const char* const why = !mapped ? (size > MAX_SCATTERED_SIZE ? "too large"
+                                                                         : "unmapped page")
+                                            : "view/import failed";
+            LOG_INFO(Render_Vulkan,
+                     "UMA host alias: scattered buffer {:#x}+{} KiB not aliased ({}, {} pages)",
+                     addr, size >> 10, why, scatter_pages.size());
             return {};
         }
         ++host_alias_stats.scattered;

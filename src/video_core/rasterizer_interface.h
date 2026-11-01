@@ -150,8 +150,8 @@ public:
     /// Unmap memory range
     virtual void UnmapMemory(DAddr addr, u64 size) = 0;
 
-    /// The device mapping of [addr, addr + size) is being removed; caches that alias the guest
-    /// memory behind it must stop using it.
+    /// The device mapping of [addr, addr + size) is being removed or replaced; caches that alias
+    /// the guest memory behind it must stop using it.
     virtual void OnDeviceMemoryUnmap([[maybe_unused]] DAddr addr, [[maybe_unused]] u64 size) {}
 
     /// A GPU engine is about to write guest memory from the CPU (inline uploads, constant
