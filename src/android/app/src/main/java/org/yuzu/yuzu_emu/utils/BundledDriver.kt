@@ -20,8 +20,9 @@ object BundledDriver {
     private const val PREF_COPIED_VERSION = "eden_uma_bundled_driver_version"
     private const val PREF_AUTO_SELECTED = "eden_uma_bundled_driver_selected"
 
-    // Adreno 8xx parts listed by the bundled Turnip's freedreno_devices.py
-    private val supportedModels = setOf(810, 812, 825, 829, 830, 840)
+    // Adreno 8xx parts listed by the bundled Turnip's freedreno_devices.py, plus the Adreno 740
+    // (Snapdragon 8 Gen 2, and the XR2 Gen 2 in the Quest 3, which Turnip lists as FD740v3)
+    private val supportedModels = setOf(740, 810, 812, 825, 829, 830, 840)
 
     val driverFile: File get() = File(GpuDriverHelper.driverStoragePath + FILE_NAME)
 

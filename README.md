@@ -19,7 +19,8 @@
 
 > [!NOTE]
 > **This is Eden UMA**, an unofficial performance fork for Android handhelds with Adreno 8xx GPUs
-> (AYN Odin 3 and similar). It lets the GPU use the emulated Switch RAM directly instead of copying it.
+> (AYN Odin 3 and similar) and the Adreno 740 (Snapdragon 8 Gen 2, Meta Quest 3). It lets the GPU use
+> the emulated Switch RAM directly instead of copying it.
 > See **[UMA.md](UMA.md)** for results, installation and the bundled Turnip driver, and report bugs
 > here rather than to the Eden team.
 

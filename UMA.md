@@ -1,7 +1,8 @@
 # Eden UMA
 
 A performance fork of [Eden](https://git.eden-emu.dev/eden-emu/eden) for Android handhelds with
-Adreno 8xx GPUs (developed and tested on an AYN Odin 3, Snapdragon 8 Elite / Adreno 830).
+Adreno 8xx GPUs and the Adreno 740 (developed and tested on an AYN Odin 3, Snapdragon 8 Elite / Adreno 830;
+the Adreno 740 path is untested).
 
 Phones and handhelds share one pool of RAM between the CPU and GPU, but emulators are written for
 PCs with separate video memory: they copy guest memory into GPU buffers, write-protect it to notice
@@ -48,8 +49,8 @@ differ. Step-by-step A/B measurements are in the commit messages.
 1. Download `eden-uma-<version>.apk` from the [latest release](../../releases/latest) on your device and
    install it (allow installs from your browser or file manager when Android asks).
 2. Open Eden UMA, add your keys and firmware, and pick your games folder, as for official Eden.
-3. Play. The Eden UMA Turnip driver is built into the APK: on the first launch on an Adreno 810, 812,
-   825, 829, 830 or 840 it is installed and selected automatically (it shows up in Settings → GPU Driver
+3. Play. The Eden UMA Turnip driver is built into the APK: on the first launch on an Adreno 740, 810,
+   812, 825, 829, 830 or 840 it is installed and selected automatically (it shows up in Settings → GPU Driver
    Manager as `turnip-uma`). On other GPUs the app uses your system driver; host aliasing then stays
    off, but the other UMA paths still apply.
 
