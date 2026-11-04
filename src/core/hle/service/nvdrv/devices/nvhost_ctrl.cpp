@@ -8,6 +8,7 @@
 #include <bit>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
 
 #include <fmt/ranges.h>
 #include "common/assert.h"
@@ -88,6 +89,28 @@ NvResult nvhost_ctrl::NvOsGetConfigU32(IocGetConfigParams& params) {
               params.param_str.data());
     return NvResult::ConfigVarNotFound; // Returns error on production mode
 }
+
+namespace {
+// A host action marks its event Signalling, signals the kevent and only then stores Signalled.
+// The signal can wake the guest, and the guest can re-arm or free that event before the store
+// lands (more often when fences complete on the host GPU's timeline, as with UMA host aliasing).
+// The state is transient and owned by the host action, so wait it out instead of reporting the
+// event as busy: NVN treats that as a failed sync wait and the game aborts.
+template <typename Event>
+void WaitForInFlightSignal(const Event& event) {
+    if (event.status.load(std::memory_order_acquire) != EventState::Signalling) {
+        return;
+    }
+    static std::atomic<u64> waits{0};
+    const u64 n = waits.fetch_add(1, std::memory_order_relaxed) + 1;
+    if ((n & (n - 1)) == 0) {
+        LOG_INFO(Service_NVDRV, "waited for an in-flight event signal ({} times)", n);
+    }
+    while (event.status.load(std::memory_order_acquire) == EventState::Signalling) {
+        std::this_thread::yield();
+    }
+}
+} // namespace
 
 NvResult nvhost_ctrl::IocCtrlEventWait(IocCtrlEventWaitParams& params, bool is_allocation) {
     LOG_DEBUG(Service_NVDRV, "syncpt_id={}, threshold={}, timeout={}, is_allocation={}",
@@ -176,6 +199,7 @@ NvResult nvhost_ctrl::IocCtrlEventWait(IocCtrlEventWaitParams& params, bool is_a
         return NvResult::BadParameter;
     }
 
+    WaitForInFlightSignal(event);
     if (event.IsBeingUsed()) {
         return NvResult::BadParameter;
     }
@@ -221,6 +245,7 @@ NvResult nvhost_ctrl::FreeEvent(u32 slot) {
         return NvResult::Success;
     }
 
+    WaitForInFlightSignal(event);
     if (event.IsBeingUsed()) {
         return NvResult::Busy;
     }
