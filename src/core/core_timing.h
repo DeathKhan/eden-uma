@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <limits>
+
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -154,6 +156,8 @@ public:
     u64 cpu_ticks{};
     s64 downcount{};
     Common::Event event{};
+    /// When the timer thread next wakes on its own (guarded by basic_lock).
+    s64 timer_thread_wake = (std::numeric_limits<s64>::max)();
     Common::Event pause_event{};
     std::function<void()> on_thread_init{};
     std::jthread timer_thread;

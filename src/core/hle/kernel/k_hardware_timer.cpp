@@ -12,6 +12,8 @@
 #include "core/core_timing.h"
 #include "core/hle/kernel/k_hardware_timer.h"
 #include "core/hle/kernel/k_scheduler.h"
+#include "core/hle/kernel/k_thread.h"
+#include "core/hle/kernel/physical_core.h"
 
 namespace Kernel {
 
@@ -102,6 +104,43 @@ void KHardwareTimer::DoTask() {
     // Clear the timer interrupt.
     // Kernel::GetInterruptManager().ClearInterrupt(KInterruptName_NonSecurePhysicalTimer,
     //                                              GetCurrentCoreId());
+}
+
+bool KHardwareTimer::IdleUntilLocalTask(PhysicalCore& core, s32 core_id) {
+    // Short guest timeouts (polling loops; Kirby and the Forgotten Land runs thousands of
+    // condition variable waits of tens of microseconds per second) otherwise end with HostTiming
+    // futex-waking this idle core thread from another thread, after rescheduling. When the next
+    // task belongs to a thread of this core, the core can wait for it itself (a timed wait that
+    // the host timer ends) and handle it here. Interrupts still end the wait early. HostTiming
+    // keeps its event as a fallback and finds nothing left to do.
+    static constexpr s64 LocalWindowNs = 1'000'000;
+    s64 task_time;
+    KTimerTask* task;
+    {
+        KScopedSpinLock lk(this->GetLock());
+        // KThread is the only kind of timer task.
+        task = this->GetNextTask();
+        if (task == nullptr || static_cast<KThread*>(task)->GetActiveCore() != core_id) {
+            return false;
+        }
+        task_time = task->GetTime();
+    }
+    const s64 delta = task_time - this->GetTick();
+    if (delta > LocalWindowNs) {
+        return false;
+    }
+    if (delta > 0) {
+        core.IdleFor(std::chrono::nanoseconds(delta));
+    }
+    if (!core.IsInterrupted() && this->GetTick() >= task_time) {
+        this->DoTask();
+        // If the task is somehow still pending, idle normally rather than spin on it.
+        KScopedSpinLock lk(this->GetLock());
+        if (this->GetNextTask() == task && task->GetTime() == task_time) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void KHardwareTimer::EnableInterrupt(s64 wakeup_time) {

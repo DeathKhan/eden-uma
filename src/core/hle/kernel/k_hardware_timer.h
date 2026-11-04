@@ -14,6 +14,8 @@ struct EventType;
 
 namespace Kernel {
 
+class PhysicalCore;
+
 // PERF: svc being executed by this host thread (0 outside svcs), for timer statistics.
 extern thread_local u32 g_perf_svc;
 void PerfNoteTimerTask(s64 delta_ns);
@@ -27,6 +29,11 @@ public:
     void Finalize();
 
     s64 GetTick() const;
+
+    /// Called by an idle core: if the next timer task is a thread of this core and due soon,
+    /// wait for it on this core's own timer and handle it here. False if there is no such task
+    /// (the caller idles until interrupted). May return without an interrupt pending.
+    bool IdleUntilLocalTask(PhysicalCore& core, s32 core_id);
 
     void RegisterAbsoluteTask(KTimerTask* task, s64 task_time) {
         KScopedDisableDispatch dd{m_kernel};

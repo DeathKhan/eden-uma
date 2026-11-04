@@ -84,6 +84,11 @@ private:
 protected:
     KernelCore& m_kernel;
 
+    /// Earliest pending task (call with the lock held).
+    KTimerTask* GetNextTask() const {
+        return m_next_task;
+    }
+
 private:
     using TimerTaskTree = Common::IntrusiveRedBlackTreeBaseTraits<KTimerTask>::TreeType<KTimerTask>;
 

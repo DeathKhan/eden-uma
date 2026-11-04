@@ -154,11 +154,14 @@ void CoreTiming::ScheduleEvent(std::chrono::nanoseconds ns_into_future,
         std::scoped_lock scope{basic_lock};
         const auto next_time{absolute_time ? ns_into_future : GetGlobalTimeNs() + ns_into_future};
 
-        // The timer thread only has to recompute its wait when this event comes before every
-        // queued one. Otherwise it is already waiting for an earlier event (removals only make
-        // the front later) and recomputes after handling it. Short guest timeouts schedule
-        // thousands of these per second, each a futex wake of the timer thread.
-        wake_timer_thread = event_queue.empty() || next_time.count() < event_queue.top().time;
+        // The timer thread only has to recompute its wait when this event comes before the
+        // time it plans to wake (set under this lock when it last read the queue); otherwise it
+        // recomputes after that wake. Short guest timeouts schedule thousands of these per
+        // second, each a futex wake of the timer thread.
+        wake_timer_thread = next_time.count() < timer_thread_wake;
+        if (wake_timer_thread) {
+            timer_thread_wake = next_time.count();
+        }
 
         auto h{event_queue.emplace(Event{next_time.count(), event_fifo_id++, event_type, 0})};
         (*h).handle = h;
@@ -305,8 +308,10 @@ std::optional<s64> CoreTiming::Advance() {
     }
 
     if (!event_queue.empty()) {
+        timer_thread_wake = event_queue.top().time;
         return event_queue.top().time;
     } else {
+        timer_thread_wake = (std::numeric_limits<s64>::max)();
         return std::nullopt;
     }
 }

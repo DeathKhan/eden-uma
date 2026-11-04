@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+
 #include "common/fiber.h"
 #include "common/scope_exit.h"
 #include "common/thread.h"
@@ -12,6 +13,7 @@
 #include "core/core_timing.h"
 #include "core/cpu_manager.h"
 #include "core/hle/kernel/k_interrupt_manager.h"
+#include "core/hle/kernel/k_hardware_timer.h"
 #include "core/hle/kernel/k_scheduler.h"
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/kernel.h"
@@ -90,10 +92,13 @@ void CpuManager::MultiCoreRunIdleThread(Kernel::KernelCore& kernel) {
     // See notes in KScheduler::ScheduleImpl for more information about why this
     // is inaccurate.
     kernel.CurrentScheduler()->OnThreadStart(kernel);
+    const s32 core_id = static_cast<s32>(kernel.CurrentPhysicalCoreIndex());
     while (true) {
         auto& physical_core = kernel.CurrentPhysicalCore();
-        if (!physical_core.IsInterrupted()) {
-            physical_core.Idle();
+        while (!physical_core.IsInterrupted()) {
+            if (!kernel.HardwareTimer().IdleUntilLocalTask(physical_core, core_id)) {
+                physical_core.Idle();
+            }
         }
         HandleInterrupt(kernel);
     }
