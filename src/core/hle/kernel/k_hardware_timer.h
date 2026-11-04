@@ -14,6 +14,10 @@ struct EventType;
 
 namespace Kernel {
 
+// PERF: svc being executed by this host thread (0 outside svcs), for timer statistics.
+extern thread_local u32 g_perf_svc;
+void PerfNoteTimerTask(s64 delta_ns);
+
 class KHardwareTimer : /* public KInterruptTask, */ public KHardwareTimerBase {
 public:
     explicit KHardwareTimer(KernelCore& kernel) : KHardwareTimerBase{kernel} {}
@@ -28,6 +32,7 @@ public:
         KScopedDisableDispatch dd{m_kernel};
         KScopedSpinLock lk{this->GetLock()};
 
+        PerfNoteTimerTask(task_time - this->GetTick());
         if (this->RegisterAbsoluteTaskImpl(task, task_time)) {
             if (task_time <= m_wakeup_time) {
                 this->EnableInterrupt(task_time);

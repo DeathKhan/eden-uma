@@ -11,6 +11,7 @@
 #include "core/arm/arm_interface.h"
 #include "core/core.h"
 #include "core/hle/kernel/k_process.h"
+#include "core/hle/kernel/k_hardware_timer.h"
 #include "core/hle/kernel/svc.h"
 
 namespace Kernel::Svc {
@@ -2505,11 +2506,13 @@ void Call(Core::System& system, u32 imm) {
     LOG_TRACE(Kernel_SVC, "{} [0]={:#x} [1]={:#x} [2]={:#x} [3]={:#x} [4]={:#x} [5]={:#x} [6]={:#x}",
         imm, GetArg64(args, 0), GetArg64(args, 1), GetArg64(args, 2),
         GetArg64(args, 3), GetArg64(args, 4), GetArg64(args, 5), GetArg64(args, 6));
+    g_perf_svc = imm;
     if (process.Is64Bit()) {
         Call64(system, imm, args);
     } else {
         Call32(system, imm, args);
     }
+    g_perf_svc = 0;
     //kernel.ExitSVCProfile();
     kernel.CurrentPhysicalCore().LoadSvcArguments(process, args);
 }

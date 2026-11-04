@@ -674,6 +674,18 @@ void KScheduler::RotateScheduledQueue(KernelCore& kernel, s32 core_id, s32 prior
     SetSchedulerUpdateNeeded(kernel);
 }
 
+bool KScheduler::IsCurrentThreadAloneOnCore(KernelCore& kernel) {
+    KThread& cur_thread = GetCurrentThread(kernel);
+    KScopedSchedulerLock sl{kernel};
+    const s32 core_id = cur_thread.GetActiveCore();
+    if (core_id < 0) {
+        return false;
+    }
+    auto& priority_queue = GetPriorityQueue(kernel);
+    return priority_queue.GetScheduledFront(core_id) == std::addressof(cur_thread) &&
+           priority_queue.GetScheduledNext(core_id, std::addressof(cur_thread)) == nullptr;
+}
+
 void KScheduler::YieldWithoutCoreMigration(KernelCore& kernel) {
     // Validate preconditions.
     ASSERT(CanSchedule(kernel));

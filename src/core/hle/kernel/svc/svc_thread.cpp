@@ -130,6 +130,23 @@ void SleepThread(Core::System& system, s64 ns) {
             timeout = (std::numeric_limits<s64>::max)();
         }
 
+        // Polling loops sleep for a few microseconds at a time (Kirby and the Forgotten Land does
+        // ~14k/s, mostly while waiting out a frame). A kernel sleep costs much more on the host
+        // than the sleep itself: arm a timer, park this core thread, then HostTiming reschedules
+        // and wakes it again from another thread. When nothing else is scheduled on this core
+        // the sleep cannot let another thread run, so idle this host core thread for the time
+        // instead (one timed futex wait ended by the host timer). PhysicalCore::Interrupt() ends
+        // the idle early when something is scheduled here; then sleep normally for what is left.
+        // Spinning instead keeps a prime core at full clock for the whole wait.
+        constexpr s64 InlineSleepMaxNs = 20'000;
+        if (ns <= InlineSleepMaxNs && kernel.IsMulticore() &&
+            KScheduler::IsCurrentThreadAloneOnCore(kernel)) {
+            kernel.CurrentPhysicalCore().IdleFor(std::chrono::nanoseconds(ns));
+            if (kernel.HardwareTimer().GetTick() >= timeout) {
+                return;
+            }
+        }
+
         // Sleep.
         // NOTE: Nintendo does not check the result of this sleep.
         static_cast<void>(GetCurrentThread(kernel).Sleep(kernel, timeout));

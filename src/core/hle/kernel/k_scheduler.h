@@ -115,6 +115,10 @@ public:
     static void YieldWithCoreMigration(KernelCore& kernel);
     static void YieldToAnyThread(KernelCore& kernel);
 
+    /// True if the current thread is the only thread scheduled on its core (so a short sleep
+    /// would leave the core idle). Takes the scheduler lock.
+    static bool IsCurrentThreadAloneOnCore(KernelCore& kernel);
+
 private:
     // Static private API.
     static KSchedulerPriorityQueue& GetPriorityQueue(KernelCore& kernel) {
