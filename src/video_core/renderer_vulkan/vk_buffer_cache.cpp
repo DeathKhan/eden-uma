@@ -261,7 +261,11 @@ HostAliasPool::HostAliasPool(const Device& device_, std::span<u8> backing_)
 }
 
 HostAliasPool::~HostAliasPool() {
+    read_views.clear();
     const auto& dld = device.GetDispatchLoader();
+    for (Import& import : imports) {
+        import.window = {}; // the window is bound to this memory
+    }
     for (const Import& import : imports) {
         dld.vkFreeMemory(*device.GetLogical(), import.memory, nullptr);
     }
@@ -315,6 +319,78 @@ const HostAliasPool::Import* HostAliasPool::FindOrImport(u8* ptr, u64 size) {
         .memory = memory,
     });
     return &imports.back();
+}
+
+std::optional<std::pair<VkBuffer, VkDeviceSize>> HostAliasPool::FindWindow(u8* ptr, u64 size,
+                                                                          int fd) {
+    for (Import& import : imports) {
+        if (ptr < import.begin || ptr + size > import.end) {
+            continue;
+        }
+        if (!import.window && !import.window_failed) {
+            const VkBufferCreateInfo ci{
+                .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .size = static_cast<VkDeviceSize>(import.end - import.begin),
+                .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                .queueFamilyIndexCount = 0,
+                .pQueueFamilyIndices = nullptr,
+            };
+            import.window = CreateBuffer(import.begin, ci);
+            import.window_failed = !import.window;
+        }
+        if (import.window) {
+            return std::pair{*import.window, static_cast<VkDeviceSize>(ptr - import.begin)};
+        }
+        break;
+    }
+    if (ptr < backing.data() || ptr + size > backing.data() + backing.size()) {
+        return std::nullopt;
+    }
+    const u64 offset = static_cast<u64>(ptr - backing.data());
+    for (const ReadView& view : read_views) {
+        if (offset >= view.begin && offset + size <= view.end) {
+            return std::pair{*view.buffer, static_cast<VkDeviceSize>(offset - view.begin)};
+        }
+    }
+    static constexpr u64 GRANULE = 64_MiB;
+    static constexpr size_t MAX_READ_VIEWS = 64;
+    static constexpr u32 MAX_READ_VIEW_FAILURES = 4;
+    if (read_views.size() >= MAX_READ_VIEWS || read_view_failures >= MAX_READ_VIEW_FAILURES) {
+        return std::nullopt;
+    }
+    const u64 begin = Common::AlignDown(offset, GRANULE);
+    const u64 end = (std::min<u64>)(Common::AlignUp(offset + size, GRANULE), backing.size());
+    std::vector<u64> pages;
+    pages.reserve((end - begin) / 4096);
+    for (u64 page = begin; page < end; page += 4096) {
+        pages.push_back(page);
+    }
+    const VkBufferCreateInfo ci{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .size = end - begin,
+        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = nullptr,
+    };
+    ReadView view{.begin = begin, .end = end, .owner = {}, .buffer = {}};
+    view.buffer = CreateScatteredBuffer(pages, fd, ci, view.owner);
+    if (!view.buffer) {
+        ++read_view_failures;
+        LOG_INFO(Render_Vulkan, "UMA host alias: texture read view of {} MiB failed",
+                 (end - begin) >> 20);
+        return std::nullopt;
+    }
+    LOG_INFO(Render_Vulkan, "UMA host alias: texture read view {} ({} MiB at {:#x})",
+             read_views.size(), (end - begin) >> 20, begin);
+    const VkBuffer handle = *view.buffer;
+    read_views.push_back(std::move(view));
+    return std::pair{handle, static_cast<VkDeviceSize>(offset - begin)};
 }
 
 vk::Buffer HostAliasPool::CreateBuffer(u8* ptr, VkBufferCreateInfo ci) {
@@ -807,11 +883,15 @@ void BufferCacheRuntime::TickFrame(Common::SlotVector<Buffer>& slot_buffers) noe
             using VideoCore::PageCounter;
             LOG_INFO(Render_Vulkan,
                      "PERF uma pages buffer protect {} ({} KiB), texture track {} ({} KiB) "
-                     "untrack {}, texture uploads {} ({} KiB, {} linear)",
+                     "untrack {}, texture uploads {} ({} KiB, {} linear, {} gpu-unswizzled "
+                     "{} KiB), gc evictions {}",
                      take(PageCounter::BufferProtect), take(PageCounter::BufferProtectKiB),
                      take(PageCounter::TextureTrack), take(PageCounter::TextureTrackKiB),
                      take(PageCounter::TextureUntrack), take(PageCounter::TextureUpload),
-                     take(PageCounter::TextureUploadKiB), take(PageCounter::TextureUploadLinear));
+                     take(PageCounter::TextureUploadKiB), take(PageCounter::TextureUploadLinear),
+                     take(PageCounter::TextureGpuUnswizzle),
+                     take(PageCounter::TextureGpuUnswizzleKiB),
+                     take(PageCounter::TextureGcEvict));
         }
     }
     for (auto it = slot_buffers.begin(); it != slot_buffers.end(); it++) {
@@ -972,6 +1052,21 @@ void BufferCacheRuntime::ForbidHostAlias(DAddr addr, u64 size) {
         host_alias_forbidden[page / 64] |= 1ULL << (page % 64);
     }
     ++host_alias_stats.dealiased;
+}
+
+std::optional<std::pair<VkBuffer, VkDeviceSize>> BufferCacheRuntime::HostAliasWindow(
+    DAddr addr, u64 size, bool* scattered) {
+    if (!host_alias_pool || !device_memory || addr == 0 || size == 0) {
+        return std::nullopt;
+    }
+    u8* const ptr = device_memory->GetSpan(addr, size);
+    if (!ptr) {
+        if (scattered) {
+            *scattered = true;
+        }
+        return std::nullopt;
+    }
+    return host_alias_pool->FindWindow(ptr, size, device_memory->GetPhysicalBackingFd());
 }
 
 vk::Buffer BufferCacheRuntime::CreateHostAliasBuffer(

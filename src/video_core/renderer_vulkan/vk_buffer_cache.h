@@ -69,6 +69,13 @@ public:
     [[nodiscard]] bool IsUsable() const noexcept {
         return memory_type != INVALID_TYPE;
     }
+
+    /// Storage-buffer window covering [ptr, ptr + size) of guest RAM for GPU reads, and ptr's
+    /// offset in it: an existing import if one covers it, else a private view of the backing
+    /// file's 64 MiB granule (never write-protected, so the import succeeds; the direct import
+    /// fails on write-protected pages and would stop aliasing).
+    [[nodiscard]] std::optional<std::pair<VkBuffer, VkDeviceSize>> FindWindow(u8* ptr, u64 size,
+                                                                              int fd);
     [[nodiscard]] size_t ImportCount() const noexcept {
         return imports.size();
     }
@@ -81,6 +88,8 @@ private:
         u8* begin;
         u8* end;
         VkDeviceMemory memory;
+        vk::Buffer window{}; ///< whole-import storage buffer for GPU reads (FindWindow)
+        bool window_failed = false;
     };
     static constexpr u32 INVALID_TYPE = ~0U;
 
@@ -90,6 +99,14 @@ private:
     std::span<u8> backing;
     u32 memory_type = INVALID_TYPE;
     std::vector<Import> imports;
+    struct ReadView {
+        u64 begin; ///< offset in the backing
+        u64 end;
+        std::shared_ptr<ScatterAlias> owner;
+        vk::Buffer buffer; ///< destroyed before owner
+    };
+    std::vector<ReadView> read_views;
+    u32 read_view_failures = 0;
     u64 imported_bytes = 0;
     bool import_failed = false;
 };
@@ -292,6 +309,11 @@ public:
     /// GPU engines wrote [addr, addr + size) from the command stream (4 KiB granularity).
     void MarkEngineWritten(DAddr addr, u64 size);
     [[nodiscard]] bool IsEngineWritten(DAddr addr, u64 size) const;
+    /// Storage-buffer window of guest RAM [addr, addr + size) for GPU reads (UMA texture
+    /// uploads), as (buffer, offset); empty if that range is not contiguous and imported.
+    [[nodiscard]] std::optional<std::pair<VkBuffer, VkDeviceSize>> HostAliasWindow(
+        DAddr addr, u64 size, bool* scattered = nullptr);
+
     /// Aliased cache buffer for [addr, addr + size), or an empty buffer.
     [[nodiscard]] vk::Buffer CreateHostAliasBuffer(
         DAddr addr, u64 size, bool sparse_compatible,

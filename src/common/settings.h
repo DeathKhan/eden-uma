@@ -717,6 +717,9 @@ struct Values {
     Setting<bool> uma_host_alias{linkage, true, "uma_host_alias", Category::RendererAdvanced};
     // Skip bookkeeping/sync only a discrete-memory GPU needs (requires uma_zero_copy).
     Setting<bool> uma_lean{linkage, true, "uma_lean", Category::RendererAdvanced};
+    // Unswizzle texture uploads on the GPU straight from aliased guest RAM (needs uma_host_alias).
+    Setting<bool> uma_gpu_unswizzle{linkage, true, "uma_gpu_unswizzle",
+                                    Category::RendererAdvanced};
     Setting<bool> renderer_debug{linkage, false, "debug", Category::RendererDebug};
     Setting<bool> renderer_shader_feedback{linkage, false, "shader_feedback",
                                            Category::RendererDebug};

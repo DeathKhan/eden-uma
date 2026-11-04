@@ -137,6 +137,27 @@ private:
     MemoryAllocator& memory_allocator;
 };
 
+/// UMA texture uploads: unswizzles every level and layer of a block-linear 2D image on the GPU
+/// straight from a host-aliased window of guest RAM into a linear buffer, then copies that into
+/// the image. Replaces the CPU unswizzle into a staging buffer.
+class UmaUnswizzle2DPass final : public ComputePass {
+public:
+    explicit UmaUnswizzle2DPass(const Device& device_, Scheduler& scheduler_,
+                                DescriptorPool& descriptor_pool_,
+                                StagingBufferPool& staging_buffer_pool_,
+                                ComputePassDescriptorQueue& compute_pass_descriptor_queue_);
+    ~UmaUnswizzle2DPass();
+
+    /// Uploads all of `image` from the guest bytes at src_offset in src_buffer; false (nothing
+    /// recorded) if the image's layout is not supported.
+    bool Upload(Image& image, VkBuffer src_buffer, VkDeviceSize src_offset);
+
+private:
+    Scheduler& scheduler;
+    StagingBufferPool& staging_buffer_pool;
+    ComputePassDescriptorQueue& compute_pass_descriptor_queue;
+};
+
 class BlockLinearUnswizzle3DPass final : public ComputePass {
 public:
     explicit BlockLinearUnswizzle3DPass(const Device& device_, Scheduler& scheduler_,

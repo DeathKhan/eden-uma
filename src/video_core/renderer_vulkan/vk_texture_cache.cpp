@@ -16,10 +16,12 @@
 #include <boost/container/small_vector.hpp>
 #include <bit>
 #include <numeric>
+#include "common/literals.h"
 #include "common/bit_util.h"
 #include "common/settings.h"
 
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
+#include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/gpu_logging/gpu_logging.h"
 
 #include "video_core/engines/fermi_2d.h"
@@ -992,6 +994,10 @@ TextureCacheRuntime::TextureCacheRuntime(const Device& device_, Scheduler& sched
     if (Settings::values.gpu_unswizzle_enabled.GetValue()) {
         bl3d_unswizzle_pass.emplace(device, scheduler, descriptor_pool,
                                    staging_buffer_pool, compute_pass_descriptor_queue);
+    }
+    if (device.IsUmaHostAlias() && Settings::values.uma_gpu_unswizzle.GetValue()) {
+        uma_unswizzle_pass.emplace(device, scheduler, descriptor_pool, staging_buffer_pool,
+                                   compute_pass_descriptor_queue);
     }
 }
 
@@ -3234,6 +3240,78 @@ VkRenderPass Framebuffer::RenderPassVariant(u32 color_clear_mask, bool depth_ste
         ++num_memoized_variants;
     }
     return variant;
+}
+
+bool TextureCacheRuntime::TryUmaGpuUpload(Image& image) {
+    using namespace Common::Literals;
+    using VideoCommon::ImageFlagBits;
+    using VideoCommon::ImageType;
+    if (!uma_unswizzle_pass || !host_alias_source || !host_alias_source->HasHostAliases()) {
+        return false;
+    }
+    // Small images are cheaper to unswizzle on the CPU than to dispatch.
+    static constexpr u32 MIN_GPU_UNSWIZZLE_BYTES = 32_KiB;
+    const VideoCommon::ImageInfo& info = image.info;
+    // PERF: why uploads are rejected (logged every 4096 rejects).
+    enum Reject : size_t {
+        Small, Type, Samples, Spacing, Aspect, Flags, NoWindow, Layout, Scattered, Count
+    };
+    static std::array<std::atomic<u64>, Reject::Count> rejects{};
+    static std::atomic<u64> reject_total{0};
+    const auto reject = [&](Reject r) {
+        rejects[r].fetch_add(1, std::memory_order_relaxed);
+        if ((reject_total.fetch_add(1, std::memory_order_relaxed) & 4095) == 4095) {
+            LOG_INFO(Render_Vulkan,
+                     "PERF uma gpu-unswizzle rejects: small {} type {} samples {} spacing {} "
+                     "aspect {} flags {} no-window {} layout {} scattered {}",
+                     rejects[Small].load(), rejects[Type].load(), rejects[Samples].load(),
+                     rejects[Spacing].load(), rejects[Aspect].load(), rejects[Flags].load(),
+                     rejects[NoWindow].load(), rejects[Layout].load(), rejects[Scattered].load());
+        }
+        if (r != Small && rejects[r].load(std::memory_order_relaxed) <= 4) {
+            LOG_INFO(Render_Vulkan,
+                     "PERF uma gpu-unswizzle reject {}: addr {:#x} {} KiB type {} format {} "
+                     "{}x{}x{} levels {} layers {} spacing {} flags {:#x}",
+                     static_cast<int>(r), image.cpu_addr, image.guest_size_bytes >> 10,
+                     static_cast<int>(info.type), static_cast<int>(info.format), info.size.width,
+                     info.size.height, info.size.depth, info.resources.levels,
+                     info.resources.layers, info.tile_width_spacing,
+                     static_cast<u32>(image.flags));
+        }
+        return false;
+    };
+    if (image.guest_size_bytes < MIN_GPU_UNSWIZZLE_BYTES) {
+        return reject(Small);
+    }
+    if (info.type != ImageType::e2D) {
+        return reject(Type);
+    }
+    if (info.num_samples != 1) {
+        return reject(Samples);
+    }
+    if (info.tile_width_spacing != 0) {
+        return reject(Spacing);
+    }
+    if (image.AspectMask() != VK_IMAGE_ASPECT_COLOR_BIT) {
+        return reject(Aspect);
+    }
+    if (True(image.flags & (ImageFlagBits::Converted | ImageFlagBits::AcceleratedUpload |
+                            ImageFlagBits::AsynchronousDecode))) {
+        return reject(Flags);
+    }
+    bool scattered = false;
+    const auto window =
+        host_alias_source->HostAliasWindow(image.cpu_addr, image.guest_size_bytes, &scattered);
+    if (!window) {
+        return reject(scattered ? Scattered : NoWindow);
+    }
+    if (!uma_unswizzle_pass->Upload(image, window->first, window->second)) {
+        return reject(Layout);
+    }
+    VideoCore::CountPage(VideoCore::PageCounter::TextureGpuUnswizzle);
+    VideoCore::CountPage(VideoCore::PageCounter::TextureGpuUnswizzleKiB,
+                         image.guest_size_bytes >> 10);
+    return true;
 }
 
 void TextureCacheRuntime::AccelerateImageUpload(

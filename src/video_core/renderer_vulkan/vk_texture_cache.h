@@ -32,6 +32,7 @@ using VideoCommon::Region2D;
 using VideoCore::Surface::PixelFormat;
 
 class BlitImageHelper;
+class BufferCacheRuntime;
 class DescriptorPool;
 class Device;
 class Image;
@@ -104,6 +105,15 @@ public:
 
     void InsertUploadMemoryBarrier() {}
 
+    /// UMA: unswizzle a block-linear 2D image on the GPU straight from aliased guest RAM.
+    /// False if the image or its memory does not qualify; the caller then uploads as usual.
+    bool TryUmaGpuUpload(Image& image);
+
+    /// Where TryUmaGpuUpload finds guest RAM windows (the buffer cache's host aliases).
+    void SetHostAliasSource(BufferCacheRuntime* runtime) noexcept {
+        host_alias_source = runtime;
+    }
+
     void TransitionImageLayout(Image& image);
 
     bool HasBrokenTextureViewFormats() const noexcept {
@@ -160,6 +170,8 @@ public:
     std::optional<ASTCDecoderPass> astc_decoder_pass;
 
     std::optional<BlockLinearUnswizzle3DPass> bl3d_unswizzle_pass;
+    std::optional<UmaUnswizzle2DPass> uma_unswizzle_pass;
+    BufferCacheRuntime* host_alias_source = nullptr;
     const Settings::ResolutionScalingInfo& resolution;
     std::array<std::vector<VkFormat>, VideoCore::Surface::MaxPixelFormat> view_formats;
 

@@ -53,6 +53,9 @@ enum class PageCounter : size_t {
     TextureUpload,     ///< RefreshContents uploads
     TextureUploadKiB,
     TextureUploadLinear,
+    TextureGpuUnswizzle,    ///< uploads unswizzled on the GPU from aliased guest RAM
+    TextureGpuUnswizzleKiB,
+    TextureGcEvict,         ///< images the texture cache garbage collector evicted
     Count,
 };
 inline std::array<std::atomic<u64>, static_cast<size_t>(PageCounter::Count)> page_counters{};

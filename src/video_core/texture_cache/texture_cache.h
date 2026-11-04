@@ -156,6 +156,7 @@ void TextureCache<P>::RunGarbageCollector() {
             UntrackImage(image, image_id);
         }
         UnregisterImage(image_id);
+        VideoCore::CountPage(VideoCore::PageCounter::TextureGcEvict);
         // A recorded download still reads the image: never destroy it immediately then.
         DeleteImage(image_id, !must_download && image.scale_tick > frame_tick + 5);
         if (aggressive_mode && total_used_memory < critical_memory) {
@@ -1174,6 +1175,13 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
 
         QueueAsyncUnswizzle(image, image_id);
         return;
+    }
+    // UMA: the GPU can read guest RAM in place, so let it unswizzle the upload itself.
+    if constexpr (requires { runtime.TryUmaGpuUpload(image); }) {
+        if (gpu_memory->IsContinuousRange(image.gpu_addr, image.guest_size_bytes) &&
+            runtime.TryUmaGpuUpload(image)) {
+            return;
+        }
     }
     auto staging = runtime.UploadStagingBuffer(MapSizeBytes(image));
     UploadImageContents(image, staging);
