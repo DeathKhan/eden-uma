@@ -407,9 +407,18 @@ void PresentManager::CopyToSwapchain(Frame* frame) {
             // Recreate surface and swapchain if needed.
             if (requires_recreation) {
 #ifdef __ANDROID__
+                // Destroy the old swapchain before replacing the surface: replacing the surface
+                // releases the old window, and destroying the swapchain afterwards touched the
+                // freed window (abort in Surface::hook_perform after an app switch).
+                swapchain.Release();
                 surface = CreateSurface(instance, render_window.GetWindowInfo());
 #endif
                 RecreateSwapchain(frame);
+                if (!swapchain.HasSwapchain()) {
+                    // The window has no size yet; try again with the next frame.
+                    surface_pending = true;
+                    break;
+                }
             }
 
             // Draw to swapchain.

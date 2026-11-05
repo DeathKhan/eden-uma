@@ -39,6 +39,16 @@ public:
     /// Acquires the next image in the swapchain, waits as needed.
     bool AcquireNextImage();
 
+    /// Destroys the swapchain now; must happen before the surface it was created on goes away.
+    void Release() {
+        Destroy();
+    }
+
+    /// True if a swapchain exists (Create can skip it while the window has no size).
+    bool HasSwapchain() const {
+        return static_cast<bool>(swapchain);
+    }
+
     /// Presents the rendered image to the swapchain.
     void Present(VkSemaphore render_semaphore);
 
