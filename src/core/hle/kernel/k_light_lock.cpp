@@ -4,11 +4,15 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+#include <thread>
+#include "common/logging.h"
 #include "core/hle/kernel/k_light_lock.h"
 #include "core/hle/kernel/k_scheduler.h"
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/k_thread_queue.h"
 #include "core/hle/kernel/kernel.h"
+#include "core/hle/kernel/svc_results.h"
 
 namespace Kernel {
 
@@ -78,6 +82,31 @@ bool KLightLock::LockSlowPath(uintptr_t _owner, uintptr_t _cur_thread) {
         }
     }
 
+    // The wait queue lives in this frame, so the wait must be over before we return. A thread
+    // switched out by the scheduler only resumes once it is; seeing ourselves still waiting here
+    // means we were let go early (seen with host threads around applet suspension and exit),
+    // after which an unlock handed the lock to us through a dead queue (crash in KThread::EndWait).
+    if (cur_thread->GetState() == ThreadState::Waiting) {
+        static std::atomic<u32> early_wakes{0};
+        if (early_wakes.fetch_add(1, std::memory_order_relaxed) < 16) {
+            LOG_WARNING(Kernel, "KLightLock: woke while still waiting (thread {} dummy={})",
+                        cur_thread->GetThreadId(), cur_thread->IsDummyThread());
+        }
+        while (cur_thread->GetState() == ThreadState::Waiting) {
+            std::this_thread::yield();
+        }
+    }
+
+    // Only an unlock passing the lock to us ends this wait with success. A termination request
+    // cancels the wait instead (ResultTerminationRequested) without handing over the lock;
+    // treating that as acquired ran the critical section beside the real owner and, on unlock,
+    // cleared the owner's tag, so a later unlock handed the lock to a thread no longer waiting
+    // for it (a crash in KThread::EndWait while a terminating applet's threads were finalized).
+    // Retry instead: termination cancels only the first wait, so the retry waits normally.
+    if (cur_thread->GetState() != ThreadState::Waiting &&
+        cur_thread->GetWaitResult() == ResultTerminationRequested) {
+        return false;
+    }
     return true;
 }
 
