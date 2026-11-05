@@ -252,8 +252,9 @@ FileType IOFile::GetType() const {
 }
 
 #if defined(__unix__)
-static int PlatformMapReadOnly(IOFile& io, const char* path) {
-    io.mmap_fd = open(path, O_RDONLY);
+/// Maps the file behind fd (taking ownership of fd) read-only; returns the descriptor, or -1.
+static int PlatformMapReadOnlyFd(IOFile& io, int fd) {
+    io.mmap_fd = fd;
     if (io.mmap_fd > 0) {
         struct stat st;
         fstat(io.mmap_fd, &st);
@@ -310,6 +311,9 @@ static int PlatformMapReadOnly(IOFile& io, const char* path) {
         }
     }
     return io.mmap_fd;
+}
+[[maybe_unused]] static int PlatformMapReadOnly(IOFile& io, const char* path) {
+    return PlatformMapReadOnlyFd(io, open(path, O_RDONLY));
 }
 static void PlatformUnmap(IOFile& io) {
     if (io.mmap_fd != -1) {
@@ -378,15 +382,22 @@ void IOFile::Open(const fs::path& path, FileAccessMode mode, FileType type, File
 #elif __ANDROID__
     if (Android::IsContentUri(path)) {
         ASSERT_MSG(mode == FileAccessMode::Read, "Content URI file access is for read-only!");
-        if (PlatformMapReadOnly(*this, path.c_str()) == -1) {
-            LOG_ERROR(Common_Filesystem, "Error mmap'ing file: {}", path.c_str());
-            int const fd = Android::OpenContentUri(path, Android::OpenMode::Read);
-            if (fd != -1) {
-                file = fdopen(fd, "r");
-                if (errno != 0 && file == nullptr)
-                    LOG_ERROR(Common_Filesystem, "Error opening file: {}, error: {}", path.c_str(), strerror(errno));
-            } else {
-                LOG_ERROR(Common_Filesystem, "Error opening file: {}", path.c_str());
+        // open() does not understand content URIs: map the descriptor the provider gives us
+        // (a duplicate, owned by the mapping). Descriptors that cannot be mapped (e.g. a pipe)
+        // are read through instead.
+        int const fd = Android::OpenContentUri(path, Android::OpenMode::Read);
+        if (fd == -1) {
+            LOG_ERROR(Common_Filesystem, "Error opening file: {}", path.c_str());
+        } else if (int const map_fd = dup(fd);
+                   map_fd != -1 && PlatformMapReadOnlyFd(*this, map_fd) != -1) {
+            close(fd);
+        } else {
+            errno = 0;
+            file = fdopen(fd, "r");
+            if (file == nullptr) {
+                LOG_ERROR(Common_Filesystem, "Error opening file: {}, error: {}", path.c_str(),
+                          strerror(errno));
+                close(fd);
             }
         }
     } else {
