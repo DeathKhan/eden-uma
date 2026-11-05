@@ -7,6 +7,7 @@
 #include <chrono>
 
 #include "common/scope_exit.h"
+#include "common/settings.h"
 #include "core/core.h"
 #include "core/core_timing.h"
 #include "core/hle/kernel/k_hardware_timer.h"
@@ -140,6 +141,7 @@ void SleepThread(Core::System& system, s64 ns) {
         // Spinning instead keeps a prime core at full clock for the whole wait.
         constexpr s64 InlineSleepMaxNs = 20'000;
         if (ns <= InlineSleepMaxNs && kernel.IsMulticore() &&
+            Settings::values.kernel_inline_sleep.GetValue() &&
             KScheduler::IsCurrentThreadAloneOnCore(kernel)) {
             kernel.CurrentPhysicalCore().IdleFor(std::chrono::nanoseconds(ns));
             if (kernel.HardwareTimer().GetTick() >= timeout) {

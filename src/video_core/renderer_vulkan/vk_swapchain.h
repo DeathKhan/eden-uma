@@ -116,6 +116,9 @@ private:
 
     void Destroy();
 
+    /// Publishes real display refresh times (VK_GOOGLE_display_timing) to Common::DisplayVsync.
+    void PublishDisplayTiming();
+
     bool NeedsPresentModeUpdate() const;
 
     VkSurfaceKHR_T* surface;
@@ -147,6 +150,13 @@ private:
 
     bool is_outdated{};
     bool is_suboptimal{};
+
+    /// Present pacing (VK_GOOGLE_display_timing); refresh_ns == 0 when unavailable.
+    u64 refresh_ns{};
+    u64 last_present_call_ns{};
+    double present_interval_ema_ns{};
+    u64 last_desired_present_ns{};
+    u32 present_id{};
 };
 
 } // namespace Vulkan

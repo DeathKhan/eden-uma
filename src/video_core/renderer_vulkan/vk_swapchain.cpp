@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <limits>
 #include <vector>
 
@@ -13,6 +14,7 @@
 #include <android/api-level.h>
 #endif
 
+#include "common/display_vsync.h"
 #include "common/logging.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
@@ -216,9 +218,48 @@ bool Swapchain::AcquireNextImage() {
 
 void Swapchain::Present(VkSemaphore render_semaphore) {
     const auto present_queue{device.GetPresentQueue()};
+    // Pacing: a game presenting every second refresh (30 fps on a 60 Hz panel) whose frames
+    // finish close to a refresh edge shows some for 3 refreshes and the next for 1 (50/17 ms
+    // pairs). Give each frame a desired present time a whole number of refreshes after the last,
+    // starting one refresh out so frame-time jitter below a refresh is absorbed.
+    VkPresentTimeGOOGLE present_time{};
+    const VkPresentTimesInfoGOOGLE present_times{
+        .sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE,
+        .pNext = nullptr,
+        .swapchainCount = 1,
+        .pTimes = &present_time,
+    };
+    const bool pace = refresh_ns != 0 && present_mode == VK_PRESENT_MODE_FIFO_KHR;
+    if (pace) {
+        const u64 now = static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                             std::chrono::steady_clock::now().time_since_epoch())
+                                             .count());
+        if (last_present_call_ns != 0) {
+            const double interval = static_cast<double>(now - last_present_call_ns);
+            present_interval_ema_ns = present_interval_ema_ns == 0.0
+                                          ? interval
+                                          : present_interval_ema_ns * 0.9 + interval * 0.1;
+        }
+        last_present_call_ns = now;
+        const u64 refreshes = std::clamp<u64>(
+            static_cast<u64>(present_interval_ema_ns / static_cast<double>(refresh_ns) + 0.5), 1,
+            4);
+        u64 desired = 0;
+        if (refreshes >= 2) {
+            desired = last_desired_present_ns + refreshes * refresh_ns;
+            if (last_desired_present_ns == 0 || desired < now) {
+                desired = now + refresh_ns; // (re)start the cadence
+            }
+            // Never queue further ahead than the cadence needs (content slightly fast).
+            desired = (std::min)(desired, now + (refreshes + 1) * refresh_ns);
+        }
+        last_desired_present_ns = desired;
+        present_time.presentID = ++present_id;
+        present_time.desiredPresentTime = desired;
+    }
     const VkPresentInfoKHR present_info{
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-        .pNext = nullptr,
+        .pNext = pace ? &present_times : nullptr,
         .waitSemaphoreCount = render_semaphore ? 1U : 0U,
         .pWaitSemaphores = &render_semaphore,
         .swapchainCount = 1,
@@ -246,6 +287,35 @@ void Swapchain::Present(VkSemaphore render_semaphore) {
     ++frame_index;
     if (frame_index >= image_count) {
         frame_index = 0;
+    }
+    if (pace) {
+        PublishDisplayTiming();
+    }
+}
+
+void Swapchain::PublishDisplayTiming() {
+    // Past presentation times give real display refresh timestamps; the emulated vsync locks
+    // its phase to them (Service::VI::Conductor).
+    const auto& dld = device.GetDispatchLoader();
+    if (!dld.vkGetPastPresentationTimingGOOGLE) {
+        return;
+    }
+    std::array<VkPastPresentationTimingGOOGLE, 8> timings{};
+    u32 count = static_cast<u32>(timings.size());
+    const VkResult result = dld.vkGetPastPresentationTimingGOOGLE(*device.GetLogical(), *swapchain,
+                                                                  &count, timings.data());
+    if ((result != VK_SUCCESS && result != VK_INCOMPLETE) || count == 0) {
+        return;
+    }
+    u64 latest = 0;
+    for (u32 i = 0; i < count; ++i) {
+        latest = (std::max)(latest, timings[i].actualPresentTime);
+    }
+    if (latest != 0) {
+        Common::DisplayVsync::refresh_period_ns.store(static_cast<s64>(refresh_ns),
+                                                      std::memory_order_relaxed);
+        Common::DisplayVsync::last_refresh_ns.store(static_cast<s64>(latest),
+                                                    std::memory_order_relaxed);
     }
 }
 
@@ -341,6 +411,20 @@ void Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
 
     images = swapchain.GetImages();
     image_count = static_cast<u32>(images.size());
+
+    refresh_ns = 0;
+    last_desired_present_ns = 0;
+    if (device.IsGoogleDisplayTimingSupported() && Settings::values.present_pacing.GetValue()) {
+        const auto& dld = device.GetDispatchLoader();
+        VkRefreshCycleDurationGOOGLE refresh{};
+        if (dld.vkGetRefreshCycleDurationGOOGLE &&
+            dld.vkGetRefreshCycleDurationGOOGLE(*device.GetLogical(), *swapchain, &refresh) ==
+                VK_SUCCESS) {
+            refresh_ns = refresh.refreshDuration;
+        }
+    }
+    LOG_INFO(Render_Vulkan, "Present pacing: {} (refresh {} ns)",
+             refresh_ns != 0 ? "on" : "off", refresh_ns);
 #ifdef __ANDROID__
     // Android is already ordered the same as Switch.
     image_view_format = VK_FORMAT_R8G8B8A8_UNORM;

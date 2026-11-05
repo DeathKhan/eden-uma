@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <memory>
 #include "common/container/unordered_map.h"
 
@@ -44,6 +45,7 @@ private:
     void ProcessVsync();
     void VsyncThread(std::stop_token token);
     s64 GetNextTicks() const;
+    s64 DisplayPhaseCorrection(s64 period, std::chrono::nanoseconds ns_late) const;
     s64 GetFramePeriodNs() const;
 
 private:

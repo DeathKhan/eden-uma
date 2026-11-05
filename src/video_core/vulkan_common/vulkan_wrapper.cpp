@@ -323,6 +323,8 @@ bool Load(VkInstance instance, InstanceDispatch& dld) noexcept {
     X(vkGetPhysicalDeviceSurfaceSupportKHR);
     X(vkGetPhysicalDeviceToolProperties);
     X(vkGetSwapchainImagesKHR);
+    X(vkGetRefreshCycleDurationGOOGLE);
+    X(vkGetPastPresentationTimingGOOGLE);
     X(vkQueuePresentKHR);
 
     return X(vkCreateDevice) && X(vkDestroyDevice) && X(vkDestroyDevice) &&

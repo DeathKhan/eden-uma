@@ -93,10 +93,12 @@ void CpuManager::MultiCoreRunIdleThread(Kernel::KernelCore& kernel) {
     // is inaccurate.
     kernel.CurrentScheduler()->OnThreadStart(kernel);
     const s32 core_id = static_cast<s32>(kernel.CurrentPhysicalCoreIndex());
+    const bool local_timer = Settings::values.kernel_local_timer.GetValue();
     while (true) {
         auto& physical_core = kernel.CurrentPhysicalCore();
         while (!physical_core.IsInterrupted()) {
-            if (!kernel.HardwareTimer().IdleUntilLocalTask(physical_core, core_id)) {
+            if (!local_timer ||
+                !kernel.HardwareTimer().IdleUntilLocalTask(physical_core, core_id)) {
                 physical_core.Idle();
             }
         }

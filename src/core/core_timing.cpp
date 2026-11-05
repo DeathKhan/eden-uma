@@ -158,7 +158,8 @@ void CoreTiming::ScheduleEvent(std::chrono::nanoseconds ns_into_future,
         // time it plans to wake (set under this lock when it last read the queue); otherwise it
         // recomputes after that wake. Short guest timeouts schedule thousands of these per
         // second, each a futex wake of the timer thread.
-        wake_timer_thread = next_time.count() < timer_thread_wake;
+        wake_timer_thread = !Settings::values.timer_wake_skip.GetValue() ||
+                            next_time.count() < timer_thread_wake;
         if (wake_timer_thread) {
             timer_thread_wake = next_time.count();
         }

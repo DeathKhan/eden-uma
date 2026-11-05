@@ -105,6 +105,7 @@ VK_DEFINE_HANDLE(VmaAllocator)
     EXTENSION(KHR, SPIRV_1_4, spirv_1_4)                                                           \
     EXTENSION(KHR, SWAPCHAIN, swapchain)                                                           \
     EXTENSION(KHR, SWAPCHAIN_MUTABLE_FORMAT, swapchain_mutable_format)                             \
+    EXTENSION(GOOGLE, DISPLAY_TIMING, display_timing)                                              \
     EXTENSION(KHR, IMAGE_FORMAT_LIST, image_format_list)                                           \
     EXTENSION(KHR, MAINTENANCE_1, maintenance1)                                                    \
     EXTENSION(KHR, MAINTENANCE_2, maintenance2)                                                    \
@@ -617,6 +618,11 @@ FN_MAX_LIMIT_LIST
     /// Returns true if VK_KHR_swapchain_mutable_format is enabled.
     bool IsKhrSwapchainMutableFormatEnabled() const {
         return extensions.swapchain_mutable_format;
+    }
+
+    /// Returns true if the device supports VK_GOOGLE_display_timing.
+    bool IsGoogleDisplayTimingSupported() const {
+        return extensions.display_timing;
     }
 
     /// Returns true if VK_KHR_shader_float_controls is enabled.

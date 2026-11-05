@@ -192,6 +192,8 @@ struct InstanceDispatch {
     PFN_vkGetPhysicalDeviceSurfacePresentModesKHR vkGetPhysicalDeviceSurfacePresentModesKHR{};
     PFN_vkGetPhysicalDeviceSurfaceSupportKHR vkGetPhysicalDeviceSurfaceSupportKHR{};
     PFN_vkGetSwapchainImagesKHR vkGetSwapchainImagesKHR{};
+    PFN_vkGetRefreshCycleDurationGOOGLE vkGetRefreshCycleDurationGOOGLE{};
+    PFN_vkGetPastPresentationTimingGOOGLE vkGetPastPresentationTimingGOOGLE{};
     PFN_vkQueuePresentKHR vkQueuePresentKHR{};
 };
 

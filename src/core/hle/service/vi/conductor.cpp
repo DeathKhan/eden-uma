@@ -5,8 +5,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 
 #include "common/adpf.h"
+#include "common/display_vsync.h"
 #include "common/settings.h"
 #include "common/thread.h"
 #include "core/core.h"
@@ -34,7 +37,9 @@ Conductor::Conductor(Core::System& system, Container& container, DisplayList& di
             [this](s64 time,
                    std::chrono::nanoseconds ns_late) -> std::optional<std::chrono::nanoseconds> {
                 m_signal.Set();
-                return std::chrono::nanoseconds(this->GetNextTicks());
+                const s64 period = this->GetNextTicks();
+                return std::chrono::nanoseconds(period +
+                                                this->DisplayPhaseCorrection(period, ns_late));
             });
 
         system.CoreTiming().ScheduleLoopingEvent(FrameNs, FrameNs, m_event);
@@ -97,6 +102,43 @@ void Conductor::VsyncThread(std::stop_token token) {
 
         this->ProcessVsync();
     }
+}
+
+s64 Conductor::DisplayPhaseCorrection(s64 period, std::chrono::nanoseconds ns_late) const {
+    // The emulated vsync runs on the host clock while the display refreshes on its own, so their
+    // phases drift. Where a frame's arrival crosses a refresh edge, timing jitter flips frames
+    // between one refresh too many and one too few (50/17 ms pairs at 30 fps). When the period
+    // is a whole number of display refreshes, steer compositions to just after a real refresh,
+    // which leaves most of a refresh for composing and presenting. Corrections are small (an
+    // eighth of the error, at most 0.5 ms per period) so the guest sees steady timing.
+    if (!Settings::values.vsync_lock.GetValue()) {
+        return 0;
+    }
+    const s64 refresh = Common::DisplayVsync::refresh_period_ns.load(std::memory_order_relaxed);
+    const s64 last_refresh = Common::DisplayVsync::last_refresh_ns.load(std::memory_order_relaxed);
+    if (refresh <= 0 || last_refresh <= 0 || period < refresh / 2) {
+        return 0;
+    }
+    const s64 refreshes = (period + refresh / 2) / refresh;
+    if (std::abs(period - refreshes * refresh) > refresh / 50) {
+        return 0;
+    }
+    const s64 now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count() -
+                    ns_late.count();
+    if (now - last_refresh > 2'000'000'000) {
+        return 0; // stale (presentation stopped or paused)
+    }
+    constexpr s64 TargetPhaseNs = 2'000'000;
+    s64 error = (now - last_refresh) % refresh - TargetPhaseNs;
+    if (error < 0) {
+        error += refresh;
+    }
+    if (error > refresh / 2) {
+        error -= refresh;
+    }
+    return std::clamp<s64>(-error / 8, -500'000, 500'000);
 }
 
 s64 Conductor::GetNextTicks() const {

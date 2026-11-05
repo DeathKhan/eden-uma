@@ -717,6 +717,16 @@ struct Values {
     Setting<bool> uma_host_alias{linkage, true, "uma_host_alias", Category::RendererAdvanced};
     // Skip bookkeeping/sync only a discrete-memory GPU needs (requires uma_zero_copy).
     Setting<bool> uma_lean{linkage, true, "uma_lean", Category::RendererAdvanced};
+    // Host timing shortcuts for guest timeouts (on by default; switches for A/B testing).
+    Setting<bool> kernel_inline_sleep{linkage, true, "kernel_inline_sleep",
+                                      Category::RendererAdvanced};
+    Setting<bool> kernel_local_timer{linkage, true, "kernel_local_timer",
+                                     Category::RendererAdvanced};
+    Setting<bool> timer_wake_skip{linkage, true, "timer_wake_skip", Category::RendererAdvanced};
+    // Lock the emulated vsync's phase to the host display's refreshes.
+    Setting<bool> vsync_lock{linkage, true, "vsync_lock", Category::RendererAdvanced};
+    // Present FIFO frames at a steady whole number of display refreshes (VK_GOOGLE_display_timing).
+    Setting<bool> present_pacing{linkage, true, "present_pacing", Category::RendererAdvanced};
     // Unswizzle texture uploads on the GPU straight from aliased guest RAM (needs uma_host_alias).
     Setting<bool> uma_gpu_unswizzle{linkage, true, "uma_gpu_unswizzle",
                                     Category::RendererAdvanced};
