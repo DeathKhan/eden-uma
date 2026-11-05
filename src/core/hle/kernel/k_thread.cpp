@@ -436,14 +436,21 @@ namespace Kernel {
             }
         }
 
-        // Acquire the scheduler lock.
-        KScopedSchedulerLock sl{kernel};
+        {
+            // Acquire the scheduler lock.
+            KScopedSchedulerLock sl{kernel};
 
-        // Signal.
-        m_signaled = true;
-        KSynchronizationObject::NotifyAvailable(kernel);
+            // Signal.
+            m_signaled = true;
+            KSynchronizationObject::NotifyAvailable(kernel);
+        }
 
-        // Close the thread.
+        // Close the thread outside the scheduler lock. The last close finalizes the thread,
+        // which unregisters it from its parent under the process list lock (a KLightLock); a
+        // thread holding the scheduler lock cannot block on that. When the lock was contended
+        // (an applet exiting while its threads were finalized) the worker "waited" without
+        // blocking, carried on as the owner and left its stack-local wait queue registered:
+        // a later unlock then crashed in KThread::EndWait.
         this->Close(kernel);
     }
 

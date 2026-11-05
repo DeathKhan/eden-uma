@@ -631,6 +631,19 @@ public:
         m_wait_queue = nullptr;
     }
 
+    /// The wait queue this thread is blocked on, if any (consistency checks).
+    const KThreadQueue* GetWaitQueue() const {
+        return m_wait_queue;
+    }
+
+    /// KLightLock: the wait queue of the light-lock wait this thread is blocked in, if any.
+    void SetLightLockWaitQueue(const KThreadQueue* queue) {
+        m_light_lock_wait_queue = queue;
+    }
+    const KThreadQueue* GetLightLockWaitQueue() const {
+        return m_light_lock_wait_queue;
+    }
+
     void BeginWait(KernelCore& kernel, KThreadQueue* queue);
     void NotifyAvailable(KernelCore& kernel, KSynchronizationObject* signaled_object, Result wait_result);
     void EndWait(KernelCore& kernel, Result wait_result);
@@ -897,6 +910,7 @@ private:
     s64 m_last_scheduled_tick{};
     std::array<QueueEntry, Core::Hardware::NUM_CPU_CORES> m_per_core_priority_queue_entry{};
     KThreadQueue* m_wait_queue{};
+    const KThreadQueue* m_light_lock_wait_queue{};
     LockWithPriorityInheritanceInfoList m_held_lock_info_list{};
     LockWithPriorityInheritanceInfo* m_waiting_lock_info{};
     WaiterList m_pinned_waiter_list{};

@@ -75,6 +75,7 @@ bool KLightLock::LockSlowPath(uintptr_t _owner, uintptr_t _cur_thread) {
         owner_thread->AddWaiter(m_kernel, cur_thread);
 
         // Begin waiting to hold the lock.
+        cur_thread->SetLightLockWaitQueue(std::addressof(wait_queue));
         cur_thread->BeginWait(m_kernel, std::addressof(wait_queue));
 
         if (owner_thread->IsSuspended()) {
@@ -82,19 +83,19 @@ bool KLightLock::LockSlowPath(uintptr_t _owner, uintptr_t _cur_thread) {
         }
     }
 
-    // The wait queue lives in this frame, so the wait must be over before we return. A thread
-    // switched out by the scheduler only resumes once it is; seeing ourselves still waiting here
-    // means we were let go early (seen with host threads around applet suspension and exit),
-    // after which an unlock handed the lock to us through a dead queue (crash in KThread::EndWait).
+    // The wait queue lives in this frame. A thread that is still waiting here did not block
+    // (it holds the scheduler lock, so it cannot): that is a bug in the caller.
     if (cur_thread->GetState() == ThreadState::Waiting) {
         static std::atomic<u32> early_wakes{0};
         if (early_wakes.fetch_add(1, std::memory_order_relaxed) < 16) {
-            LOG_WARNING(Kernel, "KLightLock: woke while still waiting (thread {} dummy={})",
-                        cur_thread->GetThreadId(), cur_thread->IsDummyThread());
+            LOG_CRITICAL(Kernel, "KLightLock: waited without blocking (thread {} dummy={})",
+                         cur_thread->GetThreadId(), cur_thread->IsDummyThread());
         }
-        while (cur_thread->GetState() == ThreadState::Waiting) {
-            std::this_thread::yield();
-        }
+    }
+
+    {
+        KScopedSchedulerLock sl{m_kernel};
+        cur_thread->SetLightLockWaitQueue(nullptr);
     }
 
     // Only an unlock passing the lock to us ends this wait with success. A termination request
@@ -127,7 +128,25 @@ void KLightLock::UnlockSlowPath(uintptr_t _cur_thread) {
         if (next_owner != nullptr) {
             next_tag = uintptr_t(next_owner) | uintptr_t(has_waiters);
 
-            next_owner->EndWait(m_kernel, ResultSuccess);
+            // Only end the wait of a thread blocked in this kind of wait: ending a wait through a
+            // queue the thread is no longer blocked on jumps through a dead stack object. A
+            // waiter left behind that way already treats itself as the owner.
+            if (next_owner->GetState() == ThreadState::Waiting &&
+                next_owner->GetWaitQueue() != nullptr &&
+                next_owner->GetWaitQueue() == next_owner->GetLightLockWaitQueue()) {
+                next_owner->EndWait(m_kernel, ResultSuccess);
+            } else {
+                static std::atomic<u32> stale_waiters{0};
+                if (stale_waiters.fetch_add(1, std::memory_order_relaxed) < 16) {
+                    LOG_CRITICAL(Kernel,
+                                 "KLightLock: next owner {} is not blocked on the lock (state {}, "
+                                 "dummy {}, termination requested {}, has waiters {})",
+                                 next_owner->GetThreadId(),
+                                 static_cast<u32>(next_owner->GetState()),
+                                 next_owner->IsDummyThread(),
+                                 next_owner->IsTerminationRequested(), has_waiters);
+                }
+            }
 
             if (next_owner->IsSuspended()) {
                 next_owner->ContinueIfHasKernelWaiters(m_kernel);
