@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <utility>
 #include "common/settings.h"
 #include "common/thread.h"
 #include "core/frontend/emu_window.h"
@@ -11,6 +12,7 @@
 #include "video_core/renderer_vulkan/present/lsfg_common.h"
 #endif
 #include "video_core/renderer_vulkan/vk_present_manager.h"
+#include "video_core/vulkan_common/vk_enum_string_helper.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
 #include "video_core/vulkan_common/vulkan_device.h"
@@ -397,7 +399,8 @@ void PresentManager::DiscardFrame(Frame* frame) {
 }
 
 void PresentManager::CopyToSwapchain(Frame* frame) {
-    bool requires_recreation = false;
+    // A previous frame lost the window and could not create a new surface yet: retry now.
+    bool requires_recreation = std::exchange(surface_pending, false);
 
     for (u32 attempt = 0; attempt < MAX_PRESENT_ATTEMPTS; ++attempt) {
         try {
@@ -410,13 +413,28 @@ void PresentManager::CopyToSwapchain(Frame* frame) {
             }
 
             // Draw to swapchain.
+            surface_pending_logged = false;
             return CopyToSwapchainImpl(frame);
         } catch (const vk::Exception& except) {
-            if (except.GetResult() != VK_ERROR_SURFACE_LOST_KHR) {
-                throw;
+            const VkResult result = except.GetResult();
+            if (result == VK_ERROR_SURFACE_LOST_KHR) {
+                requires_recreation = true;
+                continue;
             }
-
-            requires_recreation = true;
+            // Android can take the window away (app switch, recent apps) while frames are still
+            // being presented; until it hands over a new one, creating the surface fails. Drop
+            // this frame and retry with the next one instead of aborting the emulator.
+            if (requires_recreation && (result == VK_ERROR_INITIALIZATION_FAILED ||
+                                        result == VK_ERROR_NATIVE_WINDOW_IN_USE_KHR)) {
+                if (!surface_pending_logged) {
+                    LOG_WARNING(Render_Vulkan, "No window to present to ({}); waiting for one",
+                                string_VkResult(result));
+                    surface_pending_logged = true;
+                }
+                surface_pending = true;
+                break;
+            }
+            throw;
         }
     }
 

@@ -86,6 +86,8 @@ private:
     void SetImageCount();
 
 private:
+    bool surface_pending{};        ///< the window went away; recreate the surface next frame
+    bool surface_pending_logged{};
     const vk::Instance& instance;
     Core::Frontend::EmuWindow& render_window;
     const Device& device;
