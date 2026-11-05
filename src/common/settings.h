@@ -654,7 +654,16 @@ struct Values {
     SwitchableSetting<bool> emulate_bgr565{linkage, false, "emulate_bgr565",
                                             Category::RendererHacks};
 
-    SwitchableSetting<bool> use_asynchronous_shaders{linkage, false, "use_asynchronous_shaders",
+    // On by default on Android: building a new pipeline synchronously stalls the frame (a
+    // visible hitch whenever a new effect or area first appears); asynchronously the draw is
+    // skipped for a few frames instead. Pipelines seen before load from the disk cache either way.
+    SwitchableSetting<bool> use_asynchronous_shaders{linkage,
+#ifdef __ANDROID__
+                                                     true,
+#else
+                                                     false,
+#endif
+                                                     "use_asynchronous_shaders",
                                                      Category::RendererHacks};
 
     SwitchableSetting<GpuUnswizzleSize> gpu_unswizzle_texture_size{linkage,
