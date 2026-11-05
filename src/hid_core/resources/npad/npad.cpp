@@ -150,6 +150,22 @@ void NPad::ControllerUpdate(Kernel::KernelCore& kernel, Core::HID::ControllerTri
         return;
     }
 
+    // Only connection and battery changes are handled below. Motion and button updates arrive
+    // at input rate (motion from the Android sensor thread) and need none of this.
+    if (type != Core::HID::ControllerTriggerType::Connected &&
+        type != Core::HID::ControllerTriggerType::Disconnected &&
+        type != Core::HID::ControllerTriggerType::Battery) {
+        return;
+    }
+
+    // Called from frontend threads while applets register and unregister their resources (an
+    // unlocked motion update during an applet exit crashed on a null resource): hold the applet
+    // resource lock like the other users of it.
+    std::scoped_lock shared_lock{*applet_resource_holder.shared_mutex};
+    if (!applet_resource_holder.applet_resource) {
+        return;
+    }
+
     for (std::size_t aruid_index = 0; aruid_index < AruidIndexMax; aruid_index++) {
         if (controller_idx >= controller_data[aruid_index].size()) {
             return;
@@ -162,6 +178,9 @@ void NPad::ControllerUpdate(Kernel::KernelCore& kernel, Core::HID::ControllerTri
         }
 
         auto& controller = controller_data[aruid_index][controller_idx];
+        if (controller.device == nullptr) {
+            continue;
+        }
         const auto is_connected = controller.device->IsConnected();
         const auto npad_type = controller.device->GetNpadStyleIndex();
         const auto npad_id = controller.device->GetNpadIdType();
